@@ -269,6 +269,7 @@ function NumberField({ value, onChange, suffix, width = 90 }) {
           fontSize: 13,
           fontVariantNumeric: "tabular-nums",
           color: INK,
+          background: "#fff",
         }}
       />
       {suffix && <span style={{ fontSize: 12, color: MUTED }}>{suffix}</span>}
@@ -283,7 +284,7 @@ function TextField({ value, onChange, placeholder, style }) {
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      style={{ border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 9px", fontSize: 13, color: INK, width: "100%", ...style }}
+      style={{ border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 9px", fontSize: 13, color: INK, background: "#fff", width: "100%", ...style }}
     />
   );
 }
@@ -589,7 +590,7 @@ export default function ChiffrageHTMaintenance() {
   }
 
   return (
-    <div style={{ background: PAPER, minHeight: "100%", fontFamily: "Inter, system-ui, sans-serif" }} className="w-full">
+    <div style={{ background: PAPER, minHeight: "100%", fontFamily: "Inter, system-ui, sans-serif", colorScheme: "light" }} className="w-full">
       {/* Header */}
       <div style={{ background: INK }} className="px-6 py-5">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
