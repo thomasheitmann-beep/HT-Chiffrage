@@ -281,15 +281,6 @@ function Select({ value, onChange, options, style }) {
   );
 }
 
-function QteRow({ label, value, onChange, suffix }) {
-  return (
-    <div className="flex items-center justify-between gap-3 py-2 px-2 rounded-md" style={{ background: value > 0 ? "#FBF3E4" : "transparent" }}>
-      <span style={{ fontSize: 13, color: INK }}>{label}</span>
-      <NumberField value={value} onChange={onChange} suffix={suffix || "u"} width={64} />
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
 
 export default function ChiffrageHTMaintenance() {
@@ -320,11 +311,12 @@ export default function ChiffrageHTMaintenance() {
 
   // Lignes libres : batteries, composants, postes manuels (nombre illimité)
   const [lignesLibres, setLignesLibres] = useState([]);
+  const [nbAAjouter, setNbAAjouter] = useState(1);
 
-  const addLigneLibre = () =>
+  const addLigneLibre = (n = 1) =>
     setLignesLibres((ls) => [
       ...ls,
-      {
+      ...Array.from({ length: Math.max(1, Math.round(n)) }, () => ({
         id: uid(),
         famille: "batteries",
         quantite: 1,
@@ -333,14 +325,14 @@ export default function ChiffrageHTMaintenance() {
         prixAchatUnitaire: 20,
         libelleManuel: "",
         joursManuel: 1,
-      },
+        prixJour: tarifs.technicien.jour,
+      })),
     ]);
   const updateLigneLibre = (id, patch) => setLignesLibres((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
   const removeLigneLibre = (id) => setLignesLibres((ls) => ls.filter((l) => l.id !== id));
 
   function computeLigneLibre(l) {
     const famille = FAMILLES_LIBRES.find((f) => f.id === l.famille);
-    const tarif = tarifs[l.niveauTechnicien];
     const majoration = majorations[l.typeJournee];
     let montant = 0;
     let joursHomme = 0;
@@ -352,8 +344,8 @@ export default function ChiffrageHTMaintenance() {
       detail = `${euros(l.prixAchatUnitaire)} × coef ${categorie.coef} (${categorie.label}) × ${l.quantite}`;
     } else {
       joursHomme = l.joursManuel * l.quantite;
-      montant = joursHomme * tarif.jour * majoration.coef;
-      detail = `${l.joursManuel} j/u × ${l.quantite} × ${euros(tarif.jour)}/j × ${majoration.coef}`;
+      montant = joursHomme * l.prixJour * majoration.coef;
+      detail = `${l.joursManuel} j/u × ${l.quantite} × ${euros(l.prixJour)}/j × ${majoration.coef}`;
     }
     return { montant, joursHomme, detail };
   }
@@ -583,36 +575,64 @@ export default function ChiffrageHTMaintenance() {
                 </span>
               }
             >
-              <div className="flex flex-col gap-5">
+              <div className="flex flex-col gap-6">
                 {Object.entries(catalogueTemps).map(([famId, cat]) => (
                   <div key={famId}>
-                    <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4 }}>
+                    <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>
                       {cat.label}
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6">
-                      {cat.items.map((item) => (
-                        <QteRow key={item.id} label={item.label} value={quantites[item.id] || 0} onChange={(v) => setQte(item.id, v)} suffix="u" />
-                      ))}
-                    </div>
+                    <table className="w-full" style={{ fontSize: 13 }}>
+                      <tbody>
+                        {cat.items.map((item) => {
+                          const qte = quantites[item.id] || 0;
+                          return (
+                            <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                              <td className="py-2 pr-3" style={{ color: INK }}>
+                                {item.label}
+                              </td>
+                              <td className="py-2 text-right" style={{ width: 90 }}>
+                                <NumberField value={qte} onChange={(v) => setQte(item.id, v)} suffix="u" width={64} />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
                 ))}
 
                 {Object.entries(catalogueDirect).map(([famId, cat]) => (
                   <div key={famId}>
-                    <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4 }}>
+                    <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>
                       {cat.label}
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6">
-                      {cat.items.map((item) => (
-                        <QteRow
-                          key={item.id}
-                          label={`${item.label} (${euros(item.prix)}/${cat.unite})`}
-                          value={quantites[item.id] || 0}
-                          onChange={(v) => setQte(item.id, v)}
-                          suffix={cat.unite}
-                        />
-                      ))}
-                    </div>
+                    <table className="w-full" style={{ fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ color: MUTED, textAlign: "left" }}>
+                          <th className="pb-1.5 font-medium">Désignation</th>
+                          <th className="pb-1.5 font-medium text-right">Prix / {cat.unite}</th>
+                          <th className="pb-1.5 font-medium text-right">Qté</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cat.items.map((item) => {
+                          const qte = quantites[item.id] || 0;
+                          return (
+                            <tr key={item.id} style={{ borderTop: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                              <td className="py-2 pr-3" style={{ color: INK }}>
+                                {item.label}
+                              </td>
+                              <td className="py-2 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                                {euros(item.prix)}
+                              </td>
+                              <td className="py-2 text-right" style={{ width: 90 }}>
+                                <NumberField value={qte} onChange={(v) => setQte(item.id, v)} suffix={cat.unite} width={64} />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
                 ))}
               </div>
@@ -623,9 +643,16 @@ export default function ChiffrageHTMaintenance() {
               subtitle="Batteries, composants, ou tout poste hors catalogue"
               icon={ClipboardList}
               right={
-                <button onClick={addLigneLibre} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
-                  <Plus size={15} /> Ajouter une ligne
-                </button>
+                <div className="flex items-center gap-2">
+                  <NumberField value={nbAAjouter} onChange={(v) => setNbAAjouter(Math.max(1, Math.round(v)))} width={50} />
+                  <button
+                    onClick={() => addLigneLibre(nbAAjouter)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium"
+                    style={{ background: AMBER, color: INK }}
+                  >
+                    <Plus size={15} /> Ajouter
+                  </button>
+                </div>
               }
             >
               <div className="flex flex-col gap-3">
@@ -668,10 +695,18 @@ export default function ChiffrageHTMaintenance() {
                         {famille.type === "manuel" && (
                           <>
                             <div className="md:col-span-2">
-                              <label style={{ fontSize: 11, color: MUTED }}>Technicien</label>
-                              <Select value={l.niveauTechnicien} onChange={(v) => updateLigneLibre(l.id, { niveauTechnicien: v })} options={Object.entries(tarifs).map(([k, v]) => ({ value: k, label: v.label }))} />
+                              <label style={{ fontSize: 11, color: MUTED }}>Technicien (préremplit le prix)</label>
+                              <Select
+                                value={l.niveauTechnicien}
+                                onChange={(v) => updateLigneLibre(l.id, { niveauTechnicien: v, prixJour: tarifs[v].jour })}
+                                options={Object.entries(tarifs).map(([k, v]) => ({ value: k, label: v.label }))}
+                              />
                             </div>
-                            <div className="md:col-span-2">
+                            <div className="md:col-span-1">
+                              <label style={{ fontSize: 11, color: MUTED }}>Prix / jour</label>
+                              <NumberField value={l.prixJour} onChange={(v) => updateLigneLibre(l.id, { prixJour: v })} suffix="€" width="100%" />
+                            </div>
+                            <div className="md:col-span-1">
                               <label style={{ fontSize: 11, color: MUTED }}>Journée</label>
                               <Select value={l.typeJournee} onChange={(v) => updateLigneLibre(l.id, { typeJournee: v })} options={Object.entries(majorations).map(([k, v]) => ({ value: k, label: v.label }))} />
                             </div>
@@ -812,17 +847,34 @@ export default function ChiffrageHTMaintenance() {
             </SectionCard>
 
             <SectionCard title="Récapitulatif financier" icon={FileText}>
-              <div className="flex flex-col gap-2.5" style={{ fontSize: 13.5 }}>
-                <Row label="Nombre total d'équipements" value={totalEquipements} plain />
-                <Row label="Total jours-hommes" value={totalJoursHomme.toFixed(2) + " j"} plain />
-                <Row label="Montant HT avant coefficients" value={euros(totalAvantCoef)} />
-                <Row label={`Dégressivité volume (${palierDegressif.label}, ×${palierDegressif.coef})`} value={euros(totalApresDegressivite)} />
-                <Row label={`Coefficient contractuel — ${coefContratActif.label} (×${coefContratActif.coef})`} value={euros(totalFinal)} />
-                <div style={{ borderTop: `2px solid ${INK}`, marginTop: 6, paddingTop: 12 }} className="flex items-center justify-between">
-                  <span style={{ fontWeight: 700, color: INK, fontSize: 16 }}>TOTAL HT OFFRE</span>
-                  <span style={{ fontWeight: 800, color: INK, fontSize: 24, fontVariantNumeric: "tabular-nums" }}>{euros(totalFinal)}</span>
-                </div>
-              </div>
+              <table className="w-full" style={{ fontSize: 13.5 }}>
+                <tbody>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: MUTED }}>Nombre total d'équipements</td>
+                    <td className="py-2 text-right" style={{ fontWeight: 500, color: INK, fontVariantNumeric: "tabular-nums" }}>{totalEquipements}</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: MUTED }}>Total jours-hommes</td>
+                    <td className="py-2 text-right" style={{ fontWeight: 500, color: INK, fontVariantNumeric: "tabular-nums" }}>{totalJoursHomme.toFixed(2)} j</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: INK }}>Montant HT avant coefficients</td>
+                    <td className="py-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalAvantCoef)}</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: INK }}>Dégressivité volume ({palierDegressif.label}, ×{palierDegressif.coef})</td>
+                    <td className="py-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalApresDegressivite)}</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: INK }}>Coefficient contractuel — {coefContratActif.label} (×{coefContratActif.coef})</td>
+                    <td className="py-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalFinal)}</td>
+                  </tr>
+                  <tr style={{ borderTop: `2px solid ${INK}` }}>
+                    <td className="pt-3" style={{ fontWeight: 700, color: INK, fontSize: 16 }}>TOTAL HT OFFRE</td>
+                    <td className="pt-3 text-right" style={{ fontWeight: 800, color: INK, fontSize: 24, fontVariantNumeric: "tabular-nums" }}>{euros(totalFinal)}</td>
+                  </tr>
+                </tbody>
+              </table>
             </SectionCard>
           </>
         )}
@@ -968,11 +1020,3 @@ export default function ChiffrageHTMaintenance() {
   );
 }
 
-function Row({ label, value, plain }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span style={{ color: plain ? MUTED : INK }}>{label}</span>
-      <span style={{ fontWeight: plain ? 500 : 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{value}</span>
-    </div>
-  );
-}
