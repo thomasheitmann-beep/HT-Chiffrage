@@ -2,7 +2,7 @@
 // Nécessite : npm install firebase
 
 import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import { initializeFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDDA5cCPZO2Wjfx-8YP4WFJQIUVIc-Qqb0",
@@ -14,4 +14,12 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+
+// experimentalAutoDetectLongPolling : bascule automatiquement en long-polling
+// quand le canal temps réel habituel (WebChannel) est bloqué — corrige les
+// erreurs "Fetch API cannot load .../Listen/channel... due to access control
+// checks" observées sur Safari avec certains bloqueurs/réseaux.
+export const db = initializeFirestore(app, {
+  experimentalAutoDetectLongPolling: true,
+  useFetchStreams: false,
+});
