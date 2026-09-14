@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy } from "lucide-react";
+import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
 
 // ---------------------------------------------------------------------------
 // HT MAINTENANCE — OUTIL DE CHIFFRAGE
@@ -26,9 +27,9 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TARIFS = {
-  technicien: { label: "Technicien (niv. 1-4 standard)", jour: 1400, demiJour: 800 },
-  expert: { label: "Expert HT/BT", jour: 1600, demiJour: 950 },
-  ingenieur: { label: "Ingénieur", jour: 1800, demiJour: 1100 },
+  technicien: { label: "Technicien (niv. 1-4 standard)", jour: 1400 },
+  expert: { label: "Expert HT/BT", jour: 1600 },
+  ingenieur: { label: "Ingénieur", jour: 1800 },
 };
 
 const DEFAULT_MAJORATIONS = {
@@ -270,6 +271,7 @@ function NumberField({ value, onChange, suffix, width = 90 }) {
           fontVariantNumeric: "tabular-nums",
           color: INK,
           background: "#fff",
+          colorScheme: "light",
         }}
       />
       {suffix && <span style={{ fontSize: 12, color: MUTED }}>{suffix}</span>}
@@ -284,7 +286,7 @@ function TextField({ value, onChange, placeholder, style }) {
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      style={{ border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 9px", fontSize: 13, color: INK, background: "#fff", width: "100%", ...style }}
+      style={{ border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 9px", fontSize: 13, color: INK, background: "#fff", colorScheme: "light", width: "100%", ...style }}
     />
   );
 }
@@ -294,7 +296,7 @@ function Select({ value, onChange, options, style }) {
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      style={{ border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 9px", fontSize: 13, color: INK, background: "#fff", width: "100%", ...style }}
+      style={{ border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 9px", fontSize: 13, color: INK, background: "#fff", colorScheme: "light", width: "100%", ...style }}
     >
       {options.map((o) => (
         <option key={o.value} value={o.value}>
@@ -302,6 +304,72 @@ function Select({ value, onChange, options, style }) {
         </option>
       ))}
     </select>
+  );
+}
+
+// Table réutilisable pour un poste d'équipement (mêmes catalogues pour tous
+// les postes) — défini en dehors du composant principal pour ne pas être
+// recréé à chaque rendu (sinon React démonte/remonte tout le tableau à
+// chaque frappe, ce qui fait perdre le focus et remonter la page).
+function TableauCatalogue({ poste, catalogueTemps, catalogueDirect, setQtePoste }) {
+  return (
+    <div className="flex flex-col gap-6">
+      {Object.entries(catalogueTemps).map(([famId, cat]) => (
+        <div key={famId}>
+          <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
+          <table className="w-full" style={{ fontSize: 13 }}>
+            <tbody>
+              {cat.items.map((item) => {
+                const qte = poste.quantites[item.id] || 0;
+                return (
+                  <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                    <td className="py-2 pr-3" style={{ color: INK }}>
+                      {item.label}
+                    </td>
+                    <td className="py-2 text-right" style={{ width: 90 }}>
+                      <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix="u" width={64} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ))}
+
+      {Object.entries(catalogueDirect).map(([famId, cat]) => (
+        <div key={famId}>
+          <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
+          <table className="w-full" style={{ fontSize: 13 }}>
+            <thead>
+              <tr style={{ color: MUTED, textAlign: "left" }}>
+                <th className="pb-1.5 font-medium">Désignation</th>
+                <th className="pb-1.5 font-medium text-right">Prix / {cat.unite}</th>
+                <th className="pb-1.5 font-medium text-right">Qté</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cat.items.map((item) => {
+                const qte = poste.quantites[item.id] || 0;
+                return (
+                  <tr key={item.id} style={{ borderTop: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                    <td className="py-2 pr-3" style={{ color: INK }}>
+                      {item.label}
+                    </td>
+                    <td className="py-2 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                      {euros(item.prix)}
+                    </td>
+                    <td className="py-2 text-right" style={{ width: 90 }}>
+                      <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix={cat.unite} width={64} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -325,6 +393,7 @@ export default function ChiffrageHTMaintenance() {
     site: "",
     reference: "QUO-" + new Date().getFullYear() + "-001",
     contrat: "aucun",
+    degressiviteActive: true,
   });
 
   // Postes d'équipements : chacun est une checklist complète et indépendante
@@ -419,9 +488,10 @@ export default function ChiffrageHTMaintenance() {
     catalogueCoef,
   ]);
 
-  const totalEquipements =
-    lignesCatalogue.reduce((s, l) => s + (l.famille === "analyseHuile" || l.famille === "tgbt" ? 0 : l.qte), 0) +
-    lignesLibres.reduce((s, l) => s + (Number(l.quantite) || 0), 0);
+  // Les lignes libres (batteries, composants, poste manuel) ne comptent pas
+  // comme des équipements pour le calcul de la dégressivité — seuls les
+  // équipements physiques du catalogue (hors analyses d'huile et TGBT) comptent.
+  const totalEquipements = lignesCatalogue.reduce((s, l) => s + (l.famille === "analyseHuile" || l.famille === "tgbt" ? 0 : l.qte), 0);
 
   const totalJoursHomme =
     lignesCatalogue.reduce((s, l) => s + l.joursHomme, 0) + lignesLibresCalc.reduce((s, l) => s + l.joursHomme, 0);
@@ -433,7 +503,7 @@ export default function ChiffrageHTMaintenance() {
     degressivite.find((d) => totalEquipements > d.min && totalEquipements <= d.max) || degressivite[degressivite.length - 1];
   const coefContratActif = coefContrat[affaire.contrat] || { coef: 1, label: "—" };
 
-  const totalApresDegressivite = totalAvantCoef * palierDegressif.coef;
+  const totalApresDegressivite = affaire.degressiviteActive ? totalAvantCoef * palierDegressif.coef : totalAvantCoef;
   const totalFinal = totalApresDegressivite * coefContratActif.coef;
 
   const parFamille = useMemo(() => {
@@ -446,65 +516,112 @@ export default function ChiffrageHTMaintenance() {
   const nbEquipementsSaisis =
     postesEquipement.reduce((s, p) => s + Object.values(p.quantites).filter((v) => v > 0).length, 0) + lignesLibres.length;
 
-  // ---- Export Word (.doc) ----
-  function exportWord() {
+  // ---- Export Word (.docx) ----
+  // Génère un vrai fichier .docx (Office Open XML), ouvrable par Word, Pages
+  // et Google Docs — nécessite `npm install docx` dans le projet.
+  async function exportWord() {
     const dateStr = new Date().toLocaleDateString("fr-FR");
-    const ligneRows = [
+
+    const noBorder = { style: "none", size: 0, color: "FFFFFF" };
+    const noBorders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder };
+
+    const txt = (text, opts = {}) => new TextRun({ text: String(text), bold: !!opts.bold, color: opts.color });
+    const para = (text, opts = {}) => new Paragraph({ alignment: opts.right ? AlignmentType.RIGHT : AlignmentType.LEFT, children: [txt(text, opts)] });
+
+    const infoRows = [
+      ["Référence", affaire.reference || "—"],
+      ["Client", affaire.client || "—"],
+      ["Site", affaire.site || "—"],
+      ["Date", dateStr],
+      ["Cadre contractuel", coefContratActif.label],
+    ].map(
+      ([label, value]) =>
+        new TableRow({
+          children: [
+            new TableCell({ width: { size: 30, type: WidthType.PERCENTAGE }, borders: noBorders, children: [para(label, { bold: true })] }),
+            new TableCell({ borders: noBorders, children: [para(value)] }),
+          ],
+        })
+    );
+    const infoTable = new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: infoRows });
+
+    const headerCell = (text) =>
+      new TableCell({ shading: { type: ShadingType.SOLID, fill: "1B2733" }, children: [para(text, { bold: true, color: "FFFFFF" })] });
+    const dataCell = (text, opts = {}) => new TableCell({ children: [para(text, opts)] });
+
+    const equipHeader = new TableRow({ children: ["Désignation", "Poste", "Famille", "Qté", "Montant HT"].map(headerCell) });
+    const equipDataRows = [
       ...lignesCatalogue.map(
         (l) =>
-          `<tr><td>${l.label}</td><td>${l.posteNom}</td><td>${LABEL_FAMILLE[l.famille] || l.famille}</td><td style="text-align:right;">${l.qte}</td><td style="text-align:right;">${euros(l.montant)}</td></tr>`
+          new TableRow({
+            children: [
+              dataCell(l.label),
+              dataCell(l.posteNom),
+              dataCell(LABEL_FAMILLE[l.famille] || l.famille),
+              dataCell(l.qte, { right: true }),
+              dataCell(euros(l.montant), { right: true }),
+            ],
+          })
       ),
       ...lignesLibresCalc.map(
         ({ ligne: l, montant }) =>
-          `<tr><td>${l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]}</td><td>—</td><td>${LABEL_FAMILLE[l.famille] || l.famille}</td><td style="text-align:right;">${l.quantite}</td><td style="text-align:right;">${euros(montant)}</td></tr>`
+          new TableRow({
+            children: [
+              dataCell(l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]),
+              dataCell("—"),
+              dataCell(LABEL_FAMILLE[l.famille] || l.famille),
+              dataCell(l.quantite, { right: true }),
+              dataCell(euros(montant), { right: true }),
+            ],
+          })
       ),
-    ].join("");
+    ];
+    if (equipDataRows.length === 0) {
+      equipDataRows.push(new TableRow({ children: [new TableCell({ columnSpan: 5, children: [para("Aucun équipement renseigné")] })] }));
+    }
+    const equipTable = new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [equipHeader, ...equipDataRows] });
 
-    const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
-<head><meta charset="utf-8"><title>Offre ${affaire.reference}</title>
-<style>
-  body { font-family: Calibri, Arial, sans-serif; color:#1B2733; font-size: 12pt; }
-  h1 { color:#1B2733; font-size: 20pt; border-bottom: 3px solid #E8A33D; padding-bottom: 8px; }
-  h2 { color:#1B2733; font-size: 14pt; margin-top: 28px; }
-  table { border-collapse: collapse; width:100%; margin-bottom:16px; }
-  th, td { border:1px solid #DCE0E3; padding:6px 10px; font-size:10.5pt; text-align:left; }
-  th { background:#1B2733; color:#fff; }
-  .infos td { border:none; padding:2px 0; }
-  .total-row td { font-weight:bold; font-size:13pt; border-top:2px solid #1B2733; }
-</style></head>
-<body>
-  <h1>Offre de chiffrage — HT Maintenance</h1>
-  <table class="infos">
-    <tr><td><b>Référence</b></td><td>${affaire.reference || "—"}</td></tr>
-    <tr><td><b>Client</b></td><td>${affaire.client || "—"}</td></tr>
-    <tr><td><b>Site</b></td><td>${affaire.site || "—"}</td></tr>
-    <tr><td><b>Date</b></td><td>${dateStr}</td></tr>
-    <tr><td><b>Cadre contractuel</b></td><td>${coefContratActif.label}</td></tr>
-  </table>
+    const degressiviteLabel = affaire.degressiviteActive ? `Dégressivité volume (${palierDegressif.label}, ×${palierDegressif.coef})` : "Dégressivité volume (désactivée)";
+    const recapRows = [
+      ["Nombre total d'équipements", totalEquipements, false],
+      ["Total jours-hommes", `${totalJoursHomme.toFixed(2)} j`, false],
+      ["Montant HT avant coefficients", euros(totalAvantCoef), false],
+      [degressiviteLabel, euros(totalApresDegressivite), false],
+      [`Coefficient contractuel — ${coefContratActif.label} (×${coefContratActif.coef})`, euros(totalFinal), false],
+      ["TOTAL HT OFFRE", euros(totalFinal), true],
+    ].map(
+      ([label, value, bold]) =>
+        new TableRow({
+          children: [
+            new TableCell({ borders: noBorders, children: [para(label, { bold })] }),
+            new TableCell({ borders: noBorders, children: [para(value, { bold, right: true })] }),
+          ],
+        })
+    );
+    const recapTable = new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: recapRows });
 
-  <h2>Détail des équipements et prestations</h2>
-  <table>
-    <tr><th>Désignation</th><th>Poste</th><th>Famille</th><th>Qté</th><th>Montant HT</th></tr>
-    ${ligneRows || '<tr><td colspan="5">Aucun équipement renseigné</td></tr>'}
-  </table>
+    const doc = new Document({
+      sections: [
+        {
+          children: [
+            new Paragraph({ text: "Offre de chiffrage — HT Maintenance", heading: HeadingLevel.HEADING_1 }),
+            infoTable,
+            new Paragraph({ text: "", spacing: { after: 200 } }),
+            new Paragraph({ text: "Détail des équipements et prestations", heading: HeadingLevel.HEADING_2, spacing: { before: 200 } }),
+            equipTable,
+            new Paragraph({ text: "", spacing: { after: 200 } }),
+            new Paragraph({ text: "Récapitulatif financier", heading: HeadingLevel.HEADING_2, spacing: { before: 200 } }),
+            recapTable,
+          ],
+        },
+      ],
+    });
 
-  <h2>Récapitulatif financier</h2>
-  <table>
-    <tr><td>Nombre total d'équipements</td><td style="text-align:right;">${totalEquipements}</td></tr>
-    <tr><td>Total jours-hommes</td><td style="text-align:right;">${totalJoursHomme.toFixed(2)} j</td></tr>
-    <tr><td>Montant HT avant coefficients</td><td style="text-align:right;">${euros(totalAvantCoef)}</td></tr>
-    <tr><td>Dégressivité volume (${palierDegressif.label}, ×${palierDegressif.coef})</td><td style="text-align:right;">${euros(totalApresDegressivite)}</td></tr>
-    <tr><td>Coefficient contractuel — ${coefContratActif.label} (×${coefContratActif.coef})</td><td style="text-align:right;">${euros(totalFinal)}</td></tr>
-    <tr class="total-row"><td>TOTAL HT OFFRE</td><td style="text-align:right;">${euros(totalFinal)}</td></tr>
-  </table>
-</body>
-</html>`;
-
-    const blob = new Blob(["\ufeff", html], { type: "application/msword" });
+    const blob = await Packer.toBlob(doc);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `Offre_${(affaire.reference || "HT-Maintenance").replace(/[^a-zA-Z0-9_-]/g, "_")}.doc`;
+    a.download = `Offre_${(affaire.reference || "HT-Maintenance").replace(/[^a-zA-Z0-9_-]/g, "_")}.docx`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -525,69 +642,6 @@ export default function ChiffrageHTMaintenance() {
       {label}
     </button>
   );
-
-  // Table réutilisable pour un poste d'équipement (mêmes catalogues pour tous les postes)
-  function TableauCatalogue({ poste }) {
-    return (
-      <div className="flex flex-col gap-6">
-        {Object.entries(catalogueTemps).map(([famId, cat]) => (
-          <div key={famId}>
-            <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
-            <table className="w-full" style={{ fontSize: 13 }}>
-              <tbody>
-                {cat.items.map((item) => {
-                  const qte = poste.quantites[item.id] || 0;
-                  return (
-                    <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
-                      <td className="py-2 pr-3" style={{ color: INK }}>
-                        {item.label}
-                      </td>
-                      <td className="py-2 text-right" style={{ width: 90 }}>
-                        <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix="u" width={64} />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ))}
-
-        {Object.entries(catalogueDirect).map(([famId, cat]) => (
-          <div key={famId}>
-            <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
-            <table className="w-full" style={{ fontSize: 13 }}>
-              <thead>
-                <tr style={{ color: MUTED, textAlign: "left" }}>
-                  <th className="pb-1.5 font-medium">Désignation</th>
-                  <th className="pb-1.5 font-medium text-right">Prix / {cat.unite}</th>
-                  <th className="pb-1.5 font-medium text-right">Qté</th>
-                </tr>
-              </thead>
-              <tbody>
-                {cat.items.map((item) => {
-                  const qte = poste.quantites[item.id] || 0;
-                  return (
-                    <tr key={item.id} style={{ borderTop: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
-                      <td className="py-2 pr-3" style={{ color: INK }}>
-                        {item.label}
-                      </td>
-                      <td className="py-2 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                        {euros(item.prix)}
-                      </td>
-                      <td className="py-2 text-right" style={{ width: 90 }}>
-                        <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix={cat.unite} width={64} />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ))}
-      </div>
-    );
-  }
 
   return (
     <div style={{ background: PAPER, minHeight: "100%", fontFamily: "Inter, system-ui, sans-serif", colorScheme: "light" }} className="w-full">
@@ -635,14 +689,24 @@ export default function ChiffrageHTMaintenance() {
                   <TextField value={affaire.site} onChange={(v) => setAffaire((a) => ({ ...a, site: v }))} placeholder="Site / adresse" />
                 </div>
               </div>
-              <div>
-                <label style={{ fontSize: 11, color: MUTED }}>Cadre contractuel</label>
-                <Select
-                  value={affaire.contrat}
-                  onChange={(v) => setAffaire((a) => ({ ...a, contrat: v }))}
-                  options={Object.entries(coefContrat).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
-                  style={{ maxWidth: 320 }}
-                />
+              <div className="flex items-end gap-6">
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED }}>Cadre contractuel</label>
+                  <Select
+                    value={affaire.contrat}
+                    onChange={(v) => setAffaire((a) => ({ ...a, contrat: v }))}
+                    options={Object.entries(coefContrat).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
+                    style={{ maxWidth: 320 }}
+                  />
+                </div>
+                <label className="flex items-center gap-2 pb-2" style={{ fontSize: 13, color: INK, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={affaire.degressiviteActive}
+                    onChange={(e) => setAffaire((a) => ({ ...a, degressiviteActive: e.target.checked }))}
+                  />
+                  Appliquer la dégressivité volume
+                </label>
               </div>
             </SectionCard>
 
@@ -687,7 +751,7 @@ export default function ChiffrageHTMaintenance() {
                     />
                   </div>
                 </div>
-                <TableauCatalogue poste={poste} />
+                <TableauCatalogue poste={poste} catalogueTemps={catalogueTemps} catalogueDirect={catalogueDirect} setQtePoste={setQtePoste} />
               </SectionCard>
             ))}
 
@@ -926,7 +990,9 @@ export default function ChiffrageHTMaintenance() {
                     <td className="py-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalAvantCoef)}</td>
                   </tr>
                   <tr style={{ borderBottom: `1px solid ${LINE}` }}>
-                    <td className="py-2" style={{ color: INK }}>Dégressivité volume ({palierDegressif.label}, ×{palierDegressif.coef})</td>
+                    <td className="py-2" style={{ color: INK }}>
+                      {affaire.degressiviteActive ? `Dégressivité volume (${palierDegressif.label}, ×${palierDegressif.coef})` : "Dégressivité volume (désactivée)"}
+                    </td>
                     <td className="py-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalApresDegressivite)}</td>
                   </tr>
                   <tr style={{ borderBottom: `1px solid ${LINE}` }}>
@@ -954,8 +1020,8 @@ export default function ChiffrageHTMaintenance() {
                     <div className="flex flex-col gap-2">
                       <label style={{ fontSize: 11, color: MUTED }}>Prix / jour</label>
                       <NumberField value={t.jour} onChange={(v) => setTarifs((s) => ({ ...s, [key]: { ...s[key], jour: v } }))} suffix="€" width="100%" />
-                      <label style={{ fontSize: 11, color: MUTED }}>Prix / demi-journée</label>
-                      <NumberField value={t.demiJour} onChange={(v) => setTarifs((s) => ({ ...s, [key]: { ...s[key], demiJour: v } }))} suffix="€" width="100%" />
+                      <label style={{ fontSize: 11, color: MUTED }}>Prix / demi-journée (jour ÷ 2 × 1,2)</label>
+                      <div style={{ fontSize: 13, color: INK, fontWeight: 600, padding: "5px 0" }}>{euros((t.jour / 2) * 1.2)}</div>
                     </div>
                   </div>
                 ))}
