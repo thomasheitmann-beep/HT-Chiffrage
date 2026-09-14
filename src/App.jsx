@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from "react";
-import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download } from "lucide-react";
+import React, { useState, useEffect, useMemo } from "react";
+import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // HT MAINTENANCE — OUTIL DE CHIFFRAGE
@@ -18,12 +18,11 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 // ---------------------------------------------------------------------------
 // Catalogue repris du tableau réel "Niv 1-4 (standard)" du fichier
 // QUO-CHIFFRAGE HT-BT d'origine. Pour chaque équipement : heures totales
-// (niv 1-2 + niv 3-4 + préparation, réunies en une seule valeur puisque
-// le fichier applique le même taux horaire aux 4 niveaux) et amortissement
-// matériel (€, coût fixe indépendant du tarif jour). Le prix de revient
-// calculé est : (heures ÷ heures/jour) × prix jour technicien × majoration
-// + amortissement. Avec les valeurs par défaut (1 400 €/j technicien,
-// 7h/jour = 200 €/h), on retombe exactement sur les prix du fichier source.
+// (niv 1-2 + niv 3-4 + préparation) et amortissement matériel (€, coût fixe
+// indépendant du tarif jour). Prix de revient = (heures ÷ heures/jour) ×
+// prix jour technicien × majoration + amortissement. Avec les valeurs par
+// défaut (1 400 €/j technicien, 7h/jour = 200 €/h), on retombe exactement
+// sur les prix du fichier source.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TARIFS = {
@@ -152,8 +151,7 @@ const DEFAULT_CATALOGUE_COEF = {
 };
 
 // Catalogues à prix direct (pas de calcul heures × tarif) : analyses d'huile
-// et nettoyage TGBT, dont les prix du fichier source sont fixes, au mètre
-// ou à l'unité, indépendants du tarif jour technicien.
+// et nettoyage TGBT, dont les prix du fichier source sont fixes.
 const DEFAULT_CATALOGUE_DIRECT = {
   analyseHuile: {
     label: "Analyses d'huile",
@@ -179,9 +177,7 @@ const DEFAULT_CATALOGUE_DIRECT = {
   },
 };
 
-// Familles pour les "lignes libres" (batteries, composants, poste manuel) —
-// les équipements du catalogue sont renseignés directement par quantité
-// dans la checklist, pas via ces lignes.
+// Familles pour les "lignes libres" (batteries, composants, poste manuel)
 const FAMILLES_LIBRES = [
   { id: "batteries", label: "Batteries", type: "coef" },
   { id: "composants", label: "Composants", type: "coef" },
@@ -210,6 +206,10 @@ function findCoefCategory(catalogue, valeur) {
   return catalogue.categories.find((c) => valeur >= c.min && valeur <= c.max) || catalogue.categories[0];
 }
 
+function nouveauPosteEquipement(n) {
+  return { id: uid(), nom: `Poste ${n}`, niveauTechnicien: "technicien", typeJournee: "semaine", quantites: {} };
+}
+
 // ---------------------------------------------------------------------------
 
 function SectionCard({ title, icon: Icon, children, right, subtitle }) {
@@ -230,14 +230,37 @@ function SectionCard({ title, icon: Icon, children, right, subtitle }) {
   );
 }
 
+// Champ numérique robuste : garde une saisie texte locale tant que le champ
+// a le focus (permet d'effacer, taper "1" puis "0" pour "10", virgule ou
+// point) et ne se resynchronise sur la valeur numérique qu'à la perte de
+// focus ou si la valeur change depuis l'extérieur.
 function NumberField({ value, onChange, suffix, width = 90 }) {
+  const [text, setText] = useState(String(value ?? 0));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setText(String(value ?? 0));
+  }, [value, focused]);
+
   return (
     <span className="inline-flex items-center gap-1">
       <input
-        type="number"
-        min="0"
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        type="text"
+        inputMode="decimal"
+        value={text}
+        onFocus={() => setFocused(true)}
+        onChange={(e) => {
+          const raw = e.target.value;
+          if (raw === "" || /^-?\d*([.,]\d*)?$/.test(raw)) {
+            setText(raw);
+            const n = parseFloat(raw.replace(",", "."));
+            onChange(isNaN(n) ? 0 : n);
+          }
+        }}
+        onBlur={() => {
+          setFocused(false);
+          setText(String(value ?? 0));
+        }}
         style={{
           width,
           border: `1px solid ${LINE}`,
@@ -301,13 +324,23 @@ export default function ChiffrageHTMaintenance() {
     site: "",
     reference: "QUO-" + new Date().getFullYear() + "-001",
     contrat: "aucun",
-    niveauTechnicien: "technicien",
-    typeJournee: "semaine",
   });
 
-  // Quantités par équipement (catalogue temps + catalogue direct) : { itemId: quantite }
-  const [quantites, setQuantites] = useState({});
-  const setQte = (id, v) => setQuantites((q) => ({ ...q, [id]: Math.max(0, v) }));
+  // Postes d'équipements : chacun est une checklist complète et indépendante
+  // (même catalogue), avec son propre nom, technicien et type de journée.
+  const [postesEquipement, setPostesEquipement] = useState([nouveauPosteEquipement(1)]);
+
+  const addPosteEquipement = () => setPostesEquipement((ps) => [...ps, nouveauPosteEquipement(ps.length + 1)]);
+  const dupliquerPosteEquipement = (id) =>
+    setPostesEquipement((ps) => {
+      const src = ps.find((p) => p.id === id);
+      if (!src) return ps;
+      return [...ps, { ...src, id: uid(), nom: `${src.nom} (copie)`, quantites: { ...src.quantites } }];
+    });
+  const updatePosteEquipement = (id, patch) => setPostesEquipement((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  const removePosteEquipement = (id) => setPostesEquipement((ps) => (ps.length > 1 ? ps.filter((p) => p.id !== id) : ps));
+  const setQtePoste = (posteId, itemId, v) =>
+    setPostesEquipement((ps) => ps.map((p) => (p.id === posteId ? { ...p, quantites: { ...p.quantites, [itemId]: Math.max(0, v) } } : p)));
 
   // Lignes libres : batteries, composants, postes manuels (nombre illimité)
   const [lignesLibres, setLignesLibres] = useState([]);
@@ -350,31 +383,33 @@ export default function ChiffrageHTMaintenance() {
     return { montant, joursHomme, detail };
   }
 
-  // ---- Lignes issues de la checklist équipements (quantité > 0 uniquement) ----
+  // ---- Lignes issues des postes d'équipements (quantité > 0 uniquement) ----
   const lignesCatalogue = useMemo(() => {
-    const tarif = tarifs[affaire.niveauTechnicien];
-    const majoration = majorations[affaire.typeJournee];
     const out = [];
-    Object.entries(catalogueTemps).forEach(([famId, cat]) => {
-      cat.items.forEach((item) => {
-        const qte = quantites[item.id] || 0;
-        if (qte > 0) {
-          const joursHomme = (item.heures / heuresJour) * qte;
-          const montantUnitaire = (item.heures / heuresJour) * tarif.jour * majoration.coef + item.amort;
-          out.push({ id: item.id, famille: famId, label: item.label, qte, joursHomme, montant: montantUnitaire * qte });
-        }
+    postesEquipement.forEach((poste) => {
+      const tarif = tarifs[poste.niveauTechnicien];
+      const majoration = majorations[poste.typeJournee];
+      Object.entries(catalogueTemps).forEach(([famId, cat]) => {
+        cat.items.forEach((item) => {
+          const qte = poste.quantites[item.id] || 0;
+          if (qte > 0) {
+            const joursHomme = (item.heures / heuresJour) * qte;
+            const montantUnitaire = (item.heures / heuresJour) * tarif.jour * majoration.coef + item.amort;
+            out.push({ id: `${poste.id}-${item.id}`, posteId: poste.id, posteNom: poste.nom, famille: famId, label: item.label, qte, joursHomme, montant: montantUnitaire * qte });
+          }
+        });
       });
-    });
-    Object.entries(catalogueDirect).forEach(([famId, cat]) => {
-      cat.items.forEach((item) => {
-        const qte = quantites[item.id] || 0;
-        if (qte > 0) {
-          out.push({ id: item.id, famille: famId, label: item.label, qte, joursHomme: 0, montant: item.prix * qte });
-        }
+      Object.entries(catalogueDirect).forEach(([famId, cat]) => {
+        cat.items.forEach((item) => {
+          const qte = poste.quantites[item.id] || 0;
+          if (qte > 0) {
+            out.push({ id: `${poste.id}-${item.id}`, posteId: poste.id, posteNom: poste.nom, famille: famId, label: item.label, qte, joursHomme: 0, montant: item.prix * qte });
+          }
+        });
       });
     });
     return out;
-  }, [catalogueTemps, catalogueDirect, quantites, tarifs, majorations, affaire.niveauTechnicien, affaire.typeJournee, heuresJour]);
+  }, [postesEquipement, catalogueTemps, catalogueDirect, tarifs, majorations, heuresJour]);
 
   const lignesLibresCalc = useMemo(() => lignesLibres.map((l) => ({ ligne: l, ...computeLigneLibre(l) })), [
     lignesLibres,
@@ -383,7 +418,6 @@ export default function ChiffrageHTMaintenance() {
     catalogueCoef,
   ]);
 
-  // Compte les équipements physiques (hors analyses d'huile et mètres TGBT) pour la dégressivité
   const totalEquipements =
     lignesCatalogue.reduce((s, l) => s + (l.famille === "analyseHuile" || l.famille === "tgbt" ? 0 : l.qte), 0) +
     lignesLibres.reduce((s, l) => s + (Number(l.quantite) || 0), 0);
@@ -408,20 +442,20 @@ export default function ChiffrageHTMaintenance() {
     return map;
   }, [lignesCatalogue, lignesLibresCalc]);
 
-  const nbEquipementsSaisis = Object.values(quantites).filter((v) => v > 0).length + lignesLibres.length;
+  const nbEquipementsSaisis =
+    postesEquipement.reduce((s, p) => s + Object.values(p.quantites).filter((v) => v > 0).length, 0) + lignesLibres.length;
 
   // ---- Export Word (.doc) ----
-  // Génère un fichier HTML avec en-têtes Word, reconnu et pleinement éditable
-  // par Microsoft Word — aucune dépendance externe nécessaire.
   function exportWord() {
     const dateStr = new Date().toLocaleDateString("fr-FR");
     const ligneRows = [
       ...lignesCatalogue.map(
-        (l) => `<tr><td>${l.label}</td><td>${LABEL_FAMILLE[l.famille] || l.famille}</td><td style="text-align:right;">${l.qte}</td><td style="text-align:right;">${euros(l.montant)}</td></tr>`
+        (l) =>
+          `<tr><td>${l.label}</td><td>${l.posteNom}</td><td>${LABEL_FAMILLE[l.famille] || l.famille}</td><td style="text-align:right;">${l.qte}</td><td style="text-align:right;">${euros(l.montant)}</td></tr>`
       ),
       ...lignesLibresCalc.map(
         ({ ligne: l, montant }) =>
-          `<tr><td>${l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]}</td><td>${LABEL_FAMILLE[l.famille] || l.famille}</td><td style="text-align:right;">${l.quantite}</td><td style="text-align:right;">${euros(montant)}</td></tr>`
+          `<tr><td>${l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]}</td><td>—</td><td>${LABEL_FAMILLE[l.famille] || l.famille}</td><td style="text-align:right;">${l.quantite}</td><td style="text-align:right;">${euros(montant)}</td></tr>`
       ),
     ].join("");
 
@@ -449,8 +483,8 @@ export default function ChiffrageHTMaintenance() {
 
   <h2>Détail des équipements et prestations</h2>
   <table>
-    <tr><th>Désignation</th><th>Famille</th><th>Qté</th><th>Montant HT</th></tr>
-    ${ligneRows || '<tr><td colspan="4">Aucun équipement renseigné</td></tr>'}
+    <tr><th>Désignation</th><th>Poste</th><th>Famille</th><th>Qté</th><th>Montant HT</th></tr>
+    ${ligneRows || '<tr><td colspan="5">Aucun équipement renseigné</td></tr>'}
   </table>
 
   <h2>Récapitulatif financier</h2>
@@ -490,6 +524,69 @@ export default function ChiffrageHTMaintenance() {
       {label}
     </button>
   );
+
+  // Table réutilisable pour un poste d'équipement (mêmes catalogues pour tous les postes)
+  function TableauCatalogue({ poste }) {
+    return (
+      <div className="flex flex-col gap-6">
+        {Object.entries(catalogueTemps).map(([famId, cat]) => (
+          <div key={famId}>
+            <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
+            <table className="w-full" style={{ fontSize: 13 }}>
+              <tbody>
+                {cat.items.map((item) => {
+                  const qte = poste.quantites[item.id] || 0;
+                  return (
+                    <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                      <td className="py-2 pr-3" style={{ color: INK }}>
+                        {item.label}
+                      </td>
+                      <td className="py-2 text-right" style={{ width: 90 }}>
+                        <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix="u" width={64} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))}
+
+        {Object.entries(catalogueDirect).map(([famId, cat]) => (
+          <div key={famId}>
+            <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
+            <table className="w-full" style={{ fontSize: 13 }}>
+              <thead>
+                <tr style={{ color: MUTED, textAlign: "left" }}>
+                  <th className="pb-1.5 font-medium">Désignation</th>
+                  <th className="pb-1.5 font-medium text-right">Prix / {cat.unite}</th>
+                  <th className="pb-1.5 font-medium text-right">Qté</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cat.items.map((item) => {
+                  const qte = poste.quantites[item.id] || 0;
+                  return (
+                    <tr key={item.id} style={{ borderTop: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                      <td className="py-2 pr-3" style={{ color: INK }}>
+                        {item.label}
+                      </td>
+                      <td className="py-2 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                        {euros(item.prix)}
+                      </td>
+                      <td className="py-2 text-right" style={{ width: 90 }}>
+                        <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix={cat.unite} width={64} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div style={{ background: PAPER, minHeight: "100%", fontFamily: "Inter, system-ui, sans-serif" }} className="w-full">
@@ -537,106 +634,69 @@ export default function ChiffrageHTMaintenance() {
                   <TextField value={affaire.site} onChange={(v) => setAffaire((a) => ({ ...a, site: v }))} placeholder="Site / adresse" />
                 </div>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label style={{ fontSize: 11, color: MUTED }}>Cadre contractuel</label>
-                  <Select
-                    value={affaire.contrat}
-                    onChange={(v) => setAffaire((a) => ({ ...a, contrat: v }))}
-                    options={Object.entries(coefContrat).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, color: MUTED }}>Technicien (appliqué aux équipements)</label>
-                  <Select
-                    value={affaire.niveauTechnicien}
-                    onChange={(v) => setAffaire((a) => ({ ...a, niveauTechnicien: v }))}
-                    options={Object.entries(tarifs).map(([k, v]) => ({ value: k, label: `${v.label} — ${euros(v.jour)}/j` }))}
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, color: MUTED }}>Journée</label>
-                  <Select
-                    value={affaire.typeJournee}
-                    onChange={(v) => setAffaire((a) => ({ ...a, typeJournee: v }))}
-                    options={Object.entries(majorations).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
-                  />
-                </div>
+              <div>
+                <label style={{ fontSize: 11, color: MUTED }}>Cadre contractuel</label>
+                <Select
+                  value={affaire.contrat}
+                  onChange={(v) => setAffaire((a) => ({ ...a, contrat: v }))}
+                  options={Object.entries(coefContrat).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
+                  style={{ maxWidth: 320 }}
+                />
               </div>
             </SectionCard>
 
-            <SectionCard
-              title="Équipements du site"
-              subtitle="Renseignez une quantité pour autant de types d'équipements que nécessaire — pas de limite"
-              icon={ClipboardList}
-              right={
-                <span style={{ fontSize: 12, color: MUTED }}>
-                  {nbEquipementsSaisis} type{nbEquipementsSaisis > 1 ? "s" : ""} renseigné{nbEquipementsSaisis > 1 ? "s" : ""}
-                </span>
-              }
+            {postesEquipement.map((poste) => (
+              <SectionCard
+                key={poste.id}
+                title={poste.nom}
+                subtitle="Renseignez une quantité pour autant de types d'équipements que nécessaire — pas de limite"
+                icon={ClipboardList}
+                right={
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => dupliquerPosteEquipement(poste.id)} title="Dupliquer ce poste" style={{ color: INK_2 }} className="p-1.5">
+                      <Copy size={16} />
+                    </button>
+                    {postesEquipement.length > 1 && (
+                      <button onClick={() => removePosteEquipement(poste.id)} title="Supprimer ce poste" style={{ color: "#B0473E" }} className="p-1.5">
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
+                }
+              >
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED }}>Nom du poste</label>
+                    <TextField value={poste.nom} onChange={(v) => updatePosteEquipement(poste.id, { nom: v })} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED }}>Technicien</label>
+                    <Select
+                      value={poste.niveauTechnicien}
+                      onChange={(v) => updatePosteEquipement(poste.id, { niveauTechnicien: v })}
+                      options={Object.entries(tarifs).map(([k, v]) => ({ value: k, label: `${v.label} — ${euros(v.jour)}/j` }))}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED }}>Journée</label>
+                    <Select
+                      value={poste.typeJournee}
+                      onChange={(v) => updatePosteEquipement(poste.id, { typeJournee: v })}
+                      options={Object.entries(majorations).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
+                    />
+                  </div>
+                </div>
+                <TableauCatalogue poste={poste} />
+              </SectionCard>
+            ))}
+
+            <button
+              onClick={addPosteEquipement}
+              className="flex items-center justify-center gap-1.5 px-4 py-3 rounded-lg text-sm font-medium border-2 border-dashed"
+              style={{ borderColor: LINE, color: INK_2 }}
             >
-              <div className="flex flex-col gap-6">
-                {Object.entries(catalogueTemps).map(([famId, cat]) => (
-                  <div key={famId}>
-                    <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>
-                      {cat.label}
-                    </div>
-                    <table className="w-full" style={{ fontSize: 13 }}>
-                      <tbody>
-                        {cat.items.map((item) => {
-                          const qte = quantites[item.id] || 0;
-                          return (
-                            <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
-                              <td className="py-2 pr-3" style={{ color: INK }}>
-                                {item.label}
-                              </td>
-                              <td className="py-2 text-right" style={{ width: 90 }}>
-                                <NumberField value={qte} onChange={(v) => setQte(item.id, v)} suffix="u" width={64} />
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                ))}
-
-                {Object.entries(catalogueDirect).map(([famId, cat]) => (
-                  <div key={famId}>
-                    <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>
-                      {cat.label}
-                    </div>
-                    <table className="w-full" style={{ fontSize: 13 }}>
-                      <thead>
-                        <tr style={{ color: MUTED, textAlign: "left" }}>
-                          <th className="pb-1.5 font-medium">Désignation</th>
-                          <th className="pb-1.5 font-medium text-right">Prix / {cat.unite}</th>
-                          <th className="pb-1.5 font-medium text-right">Qté</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {cat.items.map((item) => {
-                          const qte = quantites[item.id] || 0;
-                          return (
-                            <tr key={item.id} style={{ borderTop: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
-                              <td className="py-2 pr-3" style={{ color: INK }}>
-                                {item.label}
-                              </td>
-                              <td className="py-2 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                                {euros(item.prix)}
-                              </td>
-                              <td className="py-2 text-right" style={{ width: 90 }}>
-                                <NumberField value={qte} onChange={(v) => setQte(item.id, v)} suffix={cat.unite} width={64} />
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                ))}
-              </div>
-            </SectionCard>
+              <Plus size={16} /> Ajouter un poste (même choix d'équipements)
+            </button>
 
             <SectionCard
               title={`Lignes libres (${lignesLibres.length})`}
@@ -743,11 +803,7 @@ export default function ChiffrageHTMaintenance() {
               title="Résumé de l'affaire"
               icon={FileText}
               right={
-                <button
-                  onClick={exportWord}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium"
-                  style={{ background: AMBER, color: INK }}
-                >
+                <button onClick={exportWord} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
                   <Download size={15} /> Exporter en Word
                 </button>
               }
@@ -777,6 +833,7 @@ export default function ChiffrageHTMaintenance() {
                 <thead>
                   <tr style={{ color: MUTED, textAlign: "left" }}>
                     <th className="pb-2 font-medium">Équipement</th>
+                    <th className="pb-2 font-medium">Poste</th>
                     <th className="pb-2 font-medium text-right">Qté</th>
                     <th className="pb-2 font-medium text-right">Montant HT</th>
                   </tr>
@@ -786,6 +843,9 @@ export default function ChiffrageHTMaintenance() {
                     <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
                       <td className="py-1.5" style={{ color: INK }}>
                         {l.label} <span style={{ color: MUTED, fontSize: 11.5 }}>({LABEL_FAMILLE[l.famille]})</span>
+                      </td>
+                      <td className="py-1.5" style={{ color: MUTED }}>
+                        {l.posteNom}
                       </td>
                       <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
                         {l.qte}
@@ -800,6 +860,9 @@ export default function ChiffrageHTMaintenance() {
                       <td className="py-1.5" style={{ color: INK }}>
                         {l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]}
                       </td>
+                      <td className="py-1.5" style={{ color: MUTED }}>
+                        —
+                      </td>
                       <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
                         {l.quantite}
                       </td>
@@ -810,7 +873,7 @@ export default function ChiffrageHTMaintenance() {
                   ))}
                   {lignesCatalogue.length === 0 && lignesLibresCalc.length === 0 && (
                     <tr>
-                      <td colSpan={3} className="py-4 text-center" style={{ color: MUTED }}>
+                      <td colSpan={4} className="py-4 text-center" style={{ color: MUTED }}>
                         Aucun équipement renseigné pour l'instant.
                       </td>
                     </tr>
@@ -1019,4 +1082,3 @@ export default function ChiffrageHTMaintenance() {
     </div>
   );
 }
-
