@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy } from "lucide-react";
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { db } from "./firebase";
 
 // ---------------------------------------------------------------------------
 // HT MAINTENANCE — OUTIL DE CHIFFRAGE
@@ -15,6 +17,8 @@ const LINE = "#DCE0E3";
 const MUTED = "#8A93A0";
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+const STORAGE_KEY = "ht-chiffrage-maintenance-v1";
+const FIRESTORE_DOC = "ht-chiffrage/etat";
 
 // ---------------------------------------------------------------------------
 // Catalogue repris du tableau réel "Niv 1-4 (standard)" du fichier
@@ -378,27 +382,40 @@ function TableauCatalogue({ poste, catalogueTemps, catalogueDirect, setQtePoste 
 export default function ChiffrageHTMaintenance() {
   const [tab, setTab] = useState("chiffrage");
 
-  const [tarifs, setTarifs] = useState(DEFAULT_TARIFS);
-  const [majorations, setMajorations] = useState(DEFAULT_MAJORATIONS);
-  const [degressivite, setDegressivite] = useState(DEFAULT_DEGRESSIVITE);
-  const [coefContrat, setCoefContrat] = useState(DEFAULT_COEF_CONTRAT);
-  const [heuresJour, setHeuresJour] = useState(7);
-
-  const [catalogueTemps, setCatalogueTemps] = useState(DEFAULT_CATALOGUE_TEMPS);
-  const [catalogueCoef, setCatalogueCoef] = useState(DEFAULT_CATALOGUE_COEF);
-  const [catalogueDirect, setCatalogueDirect] = useState(DEFAULT_CATALOGUE_DIRECT);
-
-  const [affaire, setAffaire] = useState({
-    client: "",
-    site: "",
-    reference: "QUO-" + new Date().getFullYear() + "-001",
-    contrat: "aucun",
-    degressiviteActive: true,
+  // Sauvegarde automatique dans le navigateur : relit ce qui a été enregistré
+  // au dernier passage (une seule fois, au tout premier rendu).
+  const [saved] = useState(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
   });
+
+  const [tarifs, setTarifs] = useState(saved.tarifs || DEFAULT_TARIFS);
+  const [majorations, setMajorations] = useState(saved.majorations || DEFAULT_MAJORATIONS);
+  const [degressivite, setDegressivite] = useState(saved.degressivite || DEFAULT_DEGRESSIVITE);
+  const [coefContrat, setCoefContrat] = useState(saved.coefContrat || DEFAULT_COEF_CONTRAT);
+  const [heuresJour, setHeuresJour] = useState(saved.heuresJour ?? 7);
+
+  const [catalogueTemps, setCatalogueTemps] = useState(saved.catalogueTemps || DEFAULT_CATALOGUE_TEMPS);
+  const [catalogueCoef, setCatalogueCoef] = useState(saved.catalogueCoef || DEFAULT_CATALOGUE_COEF);
+  const [catalogueDirect, setCatalogueDirect] = useState(saved.catalogueDirect || DEFAULT_CATALOGUE_DIRECT);
+
+  const [affaire, setAffaire] = useState(
+    saved.affaire || {
+      client: "",
+      site: "",
+      reference: "QUO-" + new Date().getFullYear() + "-001",
+      contrat: "aucun",
+      degressiviteActive: true,
+    }
+  );
 
   // Postes d'équipements : chacun est une checklist complète et indépendante
   // (même catalogue), avec son propre nom, technicien et type de journée.
-  const [postesEquipement, setPostesEquipement] = useState([nouveauPosteEquipement(1)]);
+  const [postesEquipement, setPostesEquipement] = useState(saved.postesEquipement || [nouveauPosteEquipement(1)]);
 
   const addPosteEquipement = () => setPostesEquipement((ps) => [...ps, nouveauPosteEquipement(ps.length + 1)]);
   const dupliquerPosteEquipement = (id) =>
@@ -413,8 +430,69 @@ export default function ChiffrageHTMaintenance() {
     setPostesEquipement((ps) => ps.map((p) => (p.id === posteId ? { ...p, quantites: { ...p.quantites, [itemId]: Math.max(0, v) } } : p)));
 
   // Lignes libres : batteries, composants, postes manuels (nombre illimité)
-  const [lignesLibres, setLignesLibres] = useState([]);
+  const [lignesLibres, setLignesLibres] = useState(saved.lignesLibres || []);
   const [nbAAjouter, setNbAAjouter] = useState(1);
+
+  const [syncState, setSyncState] = useState("idle"); // idle | loading | syncing | synced | error
+
+  // Au tout premier rendu : va chercher la dernière version enregistrée dans
+  // le cloud (Firestore), pour retrouver le même état sur n'importe quel
+  // navigateur/ordinateur. Le cache local sert de secours immédiat en attendant.
+  useEffect(() => {
+    setSyncState("loading");
+    getDoc(doc(db, FIRESTORE_DOC))
+      .then((snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (data.tarifs) setTarifs(data.tarifs);
+          if (data.majorations) setMajorations(data.majorations);
+          if (data.degressivite) setDegressivite(data.degressivite);
+          if (data.coefContrat) setCoefContrat(data.coefContrat);
+          if (data.heuresJour != null) setHeuresJour(data.heuresJour);
+          if (data.catalogueTemps) setCatalogueTemps(data.catalogueTemps);
+          if (data.catalogueCoef) setCatalogueCoef(data.catalogueCoef);
+          if (data.catalogueDirect) setCatalogueDirect(data.catalogueDirect);
+          if (data.affaire) setAffaire(data.affaire);
+          if (data.postesEquipement) setPostesEquipement(data.postesEquipement);
+          if (data.lignesLibres) setLignesLibres(data.lignesLibres);
+        }
+        setSyncState("synced");
+      })
+      .catch(() => setSyncState("error"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Enregistre automatiquement tout changement : immédiatement en local
+  // (cache rapide), et dans le cloud après une courte pause (pour ne pas
+  // envoyer une requête à chaque frappe).
+  useEffect(() => {
+    const payload = { tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect, affaire, postesEquipement, lignesLibres };
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // stockage local indisponible (navigation privée, quota dépassé...) — on continue sans bloquer
+    }
+    setSyncState("syncing");
+    const t = setTimeout(() => {
+      setDoc(doc(db, FIRESTORE_DOC), payload)
+        .then(() => setSyncState("synced"))
+        .catch(() => setSyncState("error"));
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect, affaire, postesEquipement, lignesLibres]);
+
+  const reinitialiserParametres = () => {
+    if (!window.confirm("Réinitialiser tous les paramètres et catalogues aux valeurs par défaut ?")) return;
+    setTarifs(DEFAULT_TARIFS);
+    setMajorations(DEFAULT_MAJORATIONS);
+    setDegressivite(DEFAULT_DEGRESSIVITE);
+    setCoefContrat(DEFAULT_COEF_CONTRAT);
+    setHeuresJour(7);
+    setCatalogueTemps(DEFAULT_CATALOGUE_TEMPS);
+    setCatalogueCoef(DEFAULT_CATALOGUE_COEF);
+    setCatalogueDirect(DEFAULT_CATALOGUE_DIRECT);
+  };
+
 
   const addLigneLibre = (n = 1) =>
     setLignesLibres((ls) => [
@@ -657,7 +735,15 @@ export default function ChiffrageHTMaintenance() {
               <div style={{ color: "#9AA6B2", fontSize: 12 }}>Outil de chiffrage — HTA / BT</div>
             </div>
           </div>
-          <div style={{ color: "#9AA6B2", fontSize: 12 }}>{affaire.reference}</div>
+          <div className="flex items-center gap-3">
+            <span style={{ color: "#9AA6B2", fontSize: 11 }}>
+              {syncState === "loading" && "Chargement…"}
+              {syncState === "syncing" && "Enregistrement…"}
+              {syncState === "synced" && "✓ Synchronisé"}
+              {syncState === "error" && "⚠ Hors ligne"}
+            </span>
+            <div style={{ color: "#9AA6B2", fontSize: 12 }}>{affaire.reference}</div>
+          </div>
         </div>
       </div>
 
@@ -1012,6 +1098,13 @@ export default function ChiffrageHTMaintenance() {
         {/* ---------------- ONGLET PARAMETRES ---------------- */}
         {tab === "parametres" && (
           <>
+            <div className="flex items-center justify-between">
+              <span style={{ fontSize: 12, color: MUTED }}>Vos modifications sont enregistrées automatiquement dans ce navigateur.</span>
+              <button onClick={reinitialiserParametres} className="text-sm underline" style={{ color: "#B0473E" }}>
+                Réinitialiser les valeurs par défaut
+              </button>
+            </div>
+
             <SectionCard title="Prix jour technicien" icon={Settings2}>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {Object.entries(tarifs).map(([key, t]) => (
