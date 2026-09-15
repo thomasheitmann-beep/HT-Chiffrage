@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy } from "lucide-react";
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, collection, getDocs, addDoc, deleteDoc } from "firebase/firestore";
 import { signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { db, auth } from "./firebase";
 
@@ -20,6 +20,7 @@ const MUTED = "#8A93A0";
 const uid = () => Math.random().toString(36).slice(2, 10);
 const STORAGE_KEY = "ht-chiffrage-maintenance-v1";
 const FIRESTORE_DOC = "ht-chiffrage/etat";
+const DEVIS_COLLECTION = "ht-chiffrage-devis";
 
 // ---------------------------------------------------------------------------
 // Catalogue repris du tableau réel "Niv 1-4 (standard)" du fichier
@@ -349,23 +350,13 @@ function TableauCatalogue({ poste, catalogueTemps, catalogueDirect, setQtePoste 
           <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
           <div className="overflow-x-auto">
             <table className="w-full" style={{ fontSize: 13 }}>
-              <thead>
-                <tr style={{ color: MUTED, textAlign: "left" }}>
-                  <th className="pb-1.5 font-medium">Désignation</th>
-                  <th className="pb-1.5 font-medium text-right">Prix / {cat.unite}</th>
-                  <th className="pb-1.5 font-medium text-right">Qté</th>
-                </tr>
-              </thead>
               <tbody>
                 {cat.items.map((item) => {
                   const qte = poste.quantites[item.id] || 0;
                   return (
-                    <tr key={item.id} style={{ borderTop: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                    <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
                       <td className="py-2 pr-3" style={{ color: INK }}>
                         {item.label}
-                      </td>
-                      <td className="py-2 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                        {euros(item.prix)}
                       </td>
                       <td className="py-2 text-right" style={{ width: 90 }}>
                         <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix={cat.unite} width={64} />
@@ -408,19 +399,27 @@ export default function ChiffrageHTMaintenance() {
   const [catalogueCoef, setCatalogueCoef] = useState(saved.catalogueCoef || DEFAULT_CATALOGUE_COEF);
   const [catalogueDirect, setCatalogueDirect] = useState(saved.catalogueDirect || DEFAULT_CATALOGUE_DIRECT);
 
-  const [affaire, setAffaire] = useState(
-    saved.affaire || {
-      client: "",
-      site: "",
-      reference: "DEV-" + new Date().getFullYear() + "-001",
-      contrat: "aucun",
-      degressiviteActive: true,
-    }
-  );
+  // Contenu vierge d'un chiffrage — les tarifs/catalogues (ci-dessus) restent
+  // partagés entre tous les chiffrages, seuls affaire/postes/lignes sont propres
+  // à chaque chiffrage.
+  function devisVierge() {
+    return {
+      affaire: {
+        client: "",
+        site: "",
+        reference: "DEV-" + new Date().getFullYear() + "-001",
+        contrat: "aucun",
+        degressiviteActive: true,
+      },
+      postesEquipement: [nouveauPosteEquipement(1)],
+      lignesLibres: [],
+    };
+  }
 
-  // Postes d'équipements : chacun est une checklist complète et indépendante
-  // (même catalogue), avec son propre nom, technicien et type de journée.
-  const [postesEquipement, setPostesEquipement] = useState(saved.postesEquipement || [nouveauPosteEquipement(1)]);
+  const [affaire, setAffaire] = useState(saved.affaire || devisVierge().affaire);
+  const [postesEquipement, setPostesEquipement] = useState(saved.postesEquipement || devisVierge().postesEquipement);
+  const [lignesLibres, setLignesLibres] = useState(saved.lignesLibres || []);
+  const [nbAAjouter, setNbAAjouter] = useState(1);
 
   const addPosteEquipement = () => setPostesEquipement((ps) => [...ps, nouveauPosteEquipement(ps.length + 1)]);
   const dupliquerPosteEquipement = (id) =>
@@ -434,13 +433,13 @@ export default function ChiffrageHTMaintenance() {
   const setQtePoste = (posteId, itemId, v) =>
     setPostesEquipement((ps) => ps.map((p) => (p.id === posteId ? { ...p, quantites: { ...p.quantites, [itemId]: Math.max(0, v) } } : p)));
 
-  // Lignes libres : batteries, composants, postes manuels (nombre illimité)
-  const [lignesLibres, setLignesLibres] = useState(saved.lignesLibres || []);
-  const [nbAAjouter, setNbAAjouter] = useState(1);
-
   const [syncState, setSyncState] = useState("idle"); // idle | loading | syncing | synced | error
-
   const [authReady, setAuthReady] = useState(false);
+
+  // Liste des chiffrages (devis) disponibles, et celui actuellement affiché.
+  const [devisList, setDevisList] = useState(saved.devisList || []);
+  const [currentDevisId, setCurrentDevisId] = useState(saved.currentDevisId || null);
+  const [devisReady, setDevisReady] = useState(false); // évite d'écraser un chiffrage avant la fin du chargement initial
 
   // Connexion anonyme automatique — nécessaire car les règles Firestore de ce
   // projet exigent request.auth != null. Aucune interface de connexion pour
@@ -456,10 +455,7 @@ export default function ChiffrageHTMaintenance() {
     return unsubscribe;
   }, []);
 
-  // Au tout premier rendu (une fois connecté) : va chercher la dernière
-  // version enregistrée dans le cloud (Firestore), pour retrouver le même
-  // état sur n'importe quel navigateur/ordinateur. Le cache local sert de
-  // secours immédiat en attendant.
+  // Charge les paramètres/catalogues globaux (partagés entre tous les chiffrages)
   useEffect(() => {
     if (!authReady) return;
     setSyncState("loading");
@@ -475,9 +471,6 @@ export default function ChiffrageHTMaintenance() {
           if (data.catalogueTemps) setCatalogueTemps(data.catalogueTemps);
           if (data.catalogueCoef) setCatalogueCoef(data.catalogueCoef);
           if (data.catalogueDirect) setCatalogueDirect(data.catalogueDirect);
-          if (data.affaire) setAffaire(data.affaire);
-          if (data.postesEquipement) setPostesEquipement(data.postesEquipement);
-          if (data.lignesLibres) setLignesLibres(data.lignesLibres);
         }
         setSyncState("synced");
       })
@@ -485,25 +478,163 @@ export default function ChiffrageHTMaintenance() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authReady]);
 
-  // Enregistre automatiquement tout changement : immédiatement en local
-  // (cache rapide), et dans le cloud après une courte pause (pour ne pas
-  // envoyer une requête à chaque frappe).
+  // Charge la liste des chiffrages existants, puis affiche le dernier ouvert
+  // (ou en crée un premier si la liste est vide).
   useEffect(() => {
-    const payload = { tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect, affaire, postesEquipement, lignesLibres };
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // stockage local indisponible (navigation privée, quota dépassé...) — on continue sans bloquer
-    }
     if (!authReady) return;
-    setSyncState("syncing");
+    getDocs(collection(db, DEVIS_COLLECTION))
+      .then(async (snap) => {
+        let list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        if (list.length === 0) {
+          const blank = devisVierge();
+          const payload = { ...blank, updatedAt: Date.now() };
+          const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
+          list = [{ id: ref.id, ...payload }];
+        }
+        setDevisList(list.map((d) => ({ id: d.id, reference: d.affaire?.reference, client: d.affaire?.client, updatedAt: d.updatedAt })));
+        const target = list.find((d) => d.id === currentDevisId) || list[0];
+        setCurrentDevisId(target.id);
+        setAffaire(target.affaire || devisVierge().affaire);
+        setPostesEquipement(target.postesEquipement || devisVierge().postesEquipement);
+        setLignesLibres(target.lignesLibres || []);
+        setDevisReady(true);
+      })
+      .catch(() => setSyncState("error"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady]);
+
+  // Passe à un autre chiffrage existant (sélecteur)
+  const chargerDevis = (id) => {
+    setDevisReady(false);
+    getDoc(doc(db, DEVIS_COLLECTION, id))
+      .then((snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          setCurrentDevisId(id);
+          setAffaire(data.affaire || devisVierge().affaire);
+          setPostesEquipement(data.postesEquipement || devisVierge().postesEquipement);
+          setLignesLibres(data.lignesLibres || []);
+        }
+        setDevisReady(true);
+      })
+      .catch(() => setDevisReady(true));
+  };
+
+  const nouveauChiffrage = async () => {
+    const blank = devisVierge();
+    setDevisReady(false);
+    try {
+      const payload = { ...blank, updatedAt: Date.now() };
+      const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
+      setDevisList((l) => [{ id: ref.id, reference: blank.affaire.reference, client: "", updatedAt: payload.updatedAt }, ...l]);
+      setCurrentDevisId(ref.id);
+      setAffaire(blank.affaire);
+      setPostesEquipement(blank.postesEquipement);
+      setLignesLibres(blank.lignesLibres);
+    } finally {
+      setDevisReady(true);
+    }
+  };
+
+  const dupliquerChiffrage = async () => {
+    setDevisReady(false);
+    try {
+      const payload = {
+        affaire: { ...affaire, reference: affaire.reference + " (copie)" },
+        postesEquipement: postesEquipement.map((p) => ({ ...p, quantites: { ...p.quantites } })),
+        lignesLibres: lignesLibres.map((l) => ({ ...l })),
+        updatedAt: Date.now(),
+      };
+      const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
+      setDevisList((l) => [{ id: ref.id, reference: payload.affaire.reference, client: payload.affaire.client, updatedAt: payload.updatedAt }, ...l]);
+      setCurrentDevisId(ref.id);
+      setAffaire(payload.affaire);
+      setPostesEquipement(payload.postesEquipement);
+      setLignesLibres(payload.lignesLibres);
+    } finally {
+      setDevisReady(true);
+    }
+  };
+
+  const supprimerChiffrage = async () => {
+    if (devisList.length <= 1) return;
+    if (!window.confirm(`Supprimer définitivement le chiffrage « ${affaire.reference} » ? Cette action est irréversible.`)) return;
+    const idASupprimer = currentDevisId;
+    try {
+      await deleteDoc(doc(db, DEVIS_COLLECTION, idASupprimer));
+    } catch {
+      // on continue quand même côté interface
+    }
+    const reste = devisList.filter((d) => d.id !== idASupprimer);
+    setDevisList(reste);
+    chargerDevis(reste[0].id);
+  };
+
+  // Enregistre automatiquement les paramètres/catalogues (partagés entre
+  // chiffrages) dans le cloud, après une courte pause.
+  useEffect(() => {
+    if (!authReady) return;
+    const payload = { tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect };
     const t = setTimeout(() => {
       setDoc(doc(db, FIRESTORE_DOC), payload)
         .then(() => setSyncState("synced"))
         .catch(() => setSyncState("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [authReady, tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect, affaire, postesEquipement, lignesLibres]);
+  }, [authReady, tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect]);
+
+  // Enregistre automatiquement le chiffrage courant (affaire + postes +
+  // lignes libres) dans son propre document, sans toucher aux autres.
+  useEffect(() => {
+    if (!authReady || !devisReady || !currentDevisId) return;
+    setSyncState("syncing");
+    const t = setTimeout(() => {
+      const payload = { affaire, postesEquipement, lignesLibres, updatedAt: Date.now() };
+      setDoc(doc(db, DEVIS_COLLECTION, currentDevisId), payload)
+        .then(() => {
+          setSyncState("synced");
+          setDevisList((l) => l.map((d) => (d.id === currentDevisId ? { ...d, reference: affaire.reference, client: affaire.client, updatedAt: payload.updatedAt } : d)));
+        })
+        .catch(() => setSyncState("error"));
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [authReady, devisReady, currentDevisId, affaire, postesEquipement, lignesLibres]);
+
+  // Cache local (rechargement rapide avant que le cloud ne réponde)
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          tarifs,
+          majorations,
+          degressivite,
+          coefContrat,
+          heuresJour,
+          catalogueTemps,
+          catalogueCoef,
+          catalogueDirect,
+          affaire,
+          postesEquipement,
+          lignesLibres,
+          devisList,
+          currentDevisId,
+        })
+      );
+    } catch {
+      // stockage local indisponible (navigation privée, quota dépassé...) — on continue sans bloquer
+    }
+  }, [tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect, affaire, postesEquipement, lignesLibres, devisList, currentDevisId]);
+
+  // Enregistre immédiatement les paramètres/catalogues, sans attendre le
+  // délai automatique (utile pour une confirmation explicite à l'utilisateur).
+  const enregistrerParametresMaintenant = () => {
+    setSyncState("syncing");
+    setDoc(doc(db, FIRESTORE_DOC), { tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect })
+      .then(() => setSyncState("synced"))
+      .catch(() => setSyncState("error"));
+  };
 
   const reinitialiserParametres = () => {
     if (!window.confirm("Réinitialiser tous les paramètres et catalogues aux valeurs par défaut ?")) return;
@@ -522,15 +653,10 @@ export default function ChiffrageHTMaintenance() {
   // tarifs/catalogues de Paramètres.
   const razChiffrage = () => {
     if (!window.confirm("Remettre à zéro le chiffrage en cours (infos affaire, équipements saisis, lignes libres) ? Cette action est irréversible.")) return;
-    setAffaire({
-      client: "",
-      site: "",
-      reference: "DEV-" + new Date().getFullYear() + "-001",
-      contrat: "aucun",
-      degressiviteActive: true,
-    });
-    setPostesEquipement([nouveauPosteEquipement(1)]);
-    setLignesLibres([]);
+    const blank = devisVierge();
+    setAffaire(blank.affaire);
+    setPostesEquipement(blank.postesEquipement);
+    setLignesLibres(blank.lignesLibres);
   };
 
 
@@ -800,6 +926,31 @@ export default function ChiffrageHTMaintenance() {
         {/* ---------------- ONGLET CHIFFRAGE ---------------- */}
         {tab === "chiffrage" && (
           <>
+            <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="p-4 flex flex-wrap items-center gap-3 justify-between">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span style={{ fontSize: 11, color: MUTED }}>Chiffrage</span>
+                <Select
+                  value={currentDevisId || ""}
+                  onChange={(id) => chargerDevis(id)}
+                  options={devisList.map((d) => ({ value: d.id, label: `${d.reference || "Sans référence"}${d.client ? " — " + d.client : ""}` }))}
+                  style={{ minWidth: 240, width: "auto" }}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={nouveauChiffrage} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                  <Plus size={15} /> Nouveau
+                </button>
+                <button onClick={dupliquerChiffrage} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: INK_2 }}>
+                  <Copy size={14} /> Dupliquer
+                </button>
+                {devisList.length > 1 && (
+                  <button onClick={supprimerChiffrage} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: "#B0473E" }}>
+                    <Trash2 size={14} /> Supprimer
+                  </button>
+                )}
+              </div>
+            </div>
+
             <SectionCard
               title="Informations de l'affaire"
               icon={FileText}
@@ -1152,11 +1303,16 @@ export default function ChiffrageHTMaintenance() {
         {/* ---------------- ONGLET PARAMETRES ---------------- */}
         {tab === "parametres" && (
           <>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <span style={{ fontSize: 12, color: MUTED }}>Vos modifications sont enregistrées automatiquement dans ce navigateur.</span>
-              <button onClick={reinitialiserParametres} className="text-sm underline" style={{ color: "#B0473E" }}>
-                Réinitialiser les valeurs par défaut
-              </button>
+              <div className="flex items-center gap-3">
+                <button onClick={enregistrerParametresMaintenant} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                  Enregistrer les valeurs
+                </button>
+                <button onClick={reinitialiserParametres} className="text-sm underline" style={{ color: "#B0473E" }}>
+                  Réinitialiser les valeurs par défaut
+                </button>
+              </div>
             </div>
 
             <SectionCard title="Prix jour technicien" icon={Settings2}>
