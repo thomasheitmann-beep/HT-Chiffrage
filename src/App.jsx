@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy } from "lucide-react";
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
 import { doc, getDoc, setDoc } from "firebase/firestore";
-import { db } from "./firebase";
+import { signInAnonymously, onAuthStateChanged } from "firebase/auth";
+import { db, auth } from "./firebase";
 
 // ---------------------------------------------------------------------------
 // HT MAINTENANCE — OUTIL DE CHIFFRAGE
@@ -435,10 +436,28 @@ export default function ChiffrageHTMaintenance() {
 
   const [syncState, setSyncState] = useState("idle"); // idle | loading | syncing | synced | error
 
-  // Au tout premier rendu : va chercher la dernière version enregistrée dans
-  // le cloud (Firestore), pour retrouver le même état sur n'importe quel
-  // navigateur/ordinateur. Le cache local sert de secours immédiat en attendant.
+  const [authReady, setAuthReady] = useState(false);
+
+  // Connexion anonyme automatique — nécessaire car les règles Firestore de ce
+  // projet exigent request.auth != null. Aucune interface de connexion pour
+  // l'utilisateur : ça se passe en arrière-plan, comme un accès invité.
   useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setAuthReady(true);
+      } else {
+        signInAnonymously(auth).catch(() => setSyncState("error"));
+      }
+    });
+    return unsubscribe;
+  }, []);
+
+  // Au tout premier rendu (une fois connecté) : va chercher la dernière
+  // version enregistrée dans le cloud (Firestore), pour retrouver le même
+  // état sur n'importe quel navigateur/ordinateur. Le cache local sert de
+  // secours immédiat en attendant.
+  useEffect(() => {
+    if (!authReady) return;
     setSyncState("loading");
     getDoc(doc(db, FIRESTORE_DOC))
       .then((snap) => {
@@ -460,7 +479,7 @@ export default function ChiffrageHTMaintenance() {
       })
       .catch(() => setSyncState("error"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [authReady]);
 
   // Enregistre automatiquement tout changement : immédiatement en local
   // (cache rapide), et dans le cloud après une courte pause (pour ne pas
@@ -472,6 +491,7 @@ export default function ChiffrageHTMaintenance() {
     } catch {
       // stockage local indisponible (navigation privée, quota dépassé...) — on continue sans bloquer
     }
+    if (!authReady) return;
     setSyncState("syncing");
     const t = setTimeout(() => {
       setDoc(doc(db, FIRESTORE_DOC), payload)
@@ -479,7 +499,7 @@ export default function ChiffrageHTMaintenance() {
         .catch(() => setSyncState("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect, affaire, postesEquipement, lignesLibres]);
+  }, [authReady, tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect, affaire, postesEquipement, lignesLibres]);
 
   const reinitialiserParametres = () => {
     if (!window.confirm("Réinitialiser tous les paramètres et catalogues aux valeurs par défaut ?")) return;

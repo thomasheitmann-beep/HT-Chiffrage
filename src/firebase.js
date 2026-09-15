@@ -3,6 +3,7 @@
 
 import { initializeApp } from "firebase/app";
 import { initializeFirestore } from "firebase/firestore";
+import { getAuth } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDDA5cCPZO2Wjfx-8YP4WFJQIUVIc-Qqb0",
@@ -15,11 +16,15 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
-// experimentalAutoDetectLongPolling : bascule automatiquement en long-polling
-// quand le canal temps réel habituel (WebChannel) est bloqué — corrige les
-// erreurs "Fetch API cannot load .../Listen/channel... due to access control
-// checks" observées sur Safari avec certains bloqueurs/réseaux.
+// experimentalForceLongPolling : force Firestore à utiliser de simples
+// requêtes HTTP en polling, jamais le canal de streaming temps réel —
+// nécessaire sur les anciennes versions de Safari/macOS (ex. Big Sur).
 export const db = initializeFirestore(app, {
-  experimentalAutoDetectLongPolling: true,
+  experimentalForceLongPolling: true,
   useFetchStreams: false,
 });
+
+// Les règles Firestore de ce projet exigent un utilisateur authentifié
+// (request.auth != null) — on utilise une connexion anonyme automatique,
+// sans écran de connexion ni mot de passe pour l'utilisateur.
+export const auth = getAuth(app);
