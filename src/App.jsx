@@ -1149,15 +1149,22 @@ export default function ChiffrageHTMaintenance() {
         {/* ---------------- ONGLET RECAP ---------------- */}
         {tab === "recap" && (
           <>
-            <SectionCard
-              title="Résumé de l'affaire"
-              icon={FileText}
-              right={
-                <button onClick={exportWord} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
-                  <Download size={15} /> Exporter en Word
-                </button>
-              }
-            >
+            <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="p-4 flex flex-wrap items-center gap-3 justify-between">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span style={{ fontSize: 11, color: MUTED }}>Affaire</span>
+                <Select
+                  value={currentDevisId || ""}
+                  onChange={(id) => chargerDevis(id)}
+                  options={devisList.map((d) => ({ value: d.id, label: `${d.reference || "Sans référence"}${d.client ? " — " + d.client : ""}` }))}
+                  style={{ minWidth: 240, width: "auto" }}
+                />
+              </div>
+              <button onClick={exportWord} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                <Download size={15} /> Exporter en Word
+              </button>
+            </div>
+
+            <SectionCard title="Résumé de l'affaire" icon={FileText}>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
                 <div>
                   <div style={{ fontSize: 11, color: MUTED }}>Référence</div>
