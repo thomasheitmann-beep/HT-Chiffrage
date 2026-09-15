@@ -517,6 +517,22 @@ export default function ChiffrageHTMaintenance() {
     setCatalogueDirect(DEFAULT_CATALOGUE_DIRECT);
   };
 
+  // RAZ du chiffrage en cours : vide l'affaire, les postes d'équipements et
+  // les lignes libres pour repartir sur un devis neuf. Ne touche pas aux
+  // tarifs/catalogues de Paramètres.
+  const razChiffrage = () => {
+    if (!window.confirm("Remettre à zéro le chiffrage en cours (infos affaire, équipements saisis, lignes libres) ? Cette action est irréversible.")) return;
+    setAffaire({
+      client: "",
+      site: "",
+      reference: "DEV-" + new Date().getFullYear() + "-001",
+      contrat: "aucun",
+      degressiviteActive: true,
+    });
+    setPostesEquipement([nouveauPosteEquipement(1)]);
+    setLignesLibres([]);
+  };
+
 
   const addLigneLibre = (n = 1) =>
     setLignesLibres((ls) => [
@@ -784,7 +800,15 @@ export default function ChiffrageHTMaintenance() {
         {/* ---------------- ONGLET CHIFFRAGE ---------------- */}
         {tab === "chiffrage" && (
           <>
-            <SectionCard title="Informations de l'affaire" icon={FileText}>
+            <SectionCard
+              title="Informations de l'affaire"
+              icon={FileText}
+              right={
+                <button onClick={razChiffrage} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: "#B0473E" }}>
+                  <Trash2 size={14} /> RAZ le chiffrage
+                </button>
+              }
+            >
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
                 <div>
                   <label style={{ fontSize: 11, color: MUTED }}>Référence</label>
