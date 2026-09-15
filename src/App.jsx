@@ -221,7 +221,7 @@ function nouveauPosteEquipement(n) {
 function SectionCard({ title, icon: Icon, children, right, subtitle }) {
   return (
     <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="overflow-hidden">
-      <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: `1px solid ${LINE}` }}>
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 md:px-5 py-4" style={{ borderBottom: `1px solid ${LINE}` }}>
         <div className="flex items-center gap-2">
           {Icon && <Icon size={17} color={INK_2} />}
           <div>
@@ -231,7 +231,7 @@ function SectionCard({ title, icon: Icon, children, right, subtitle }) {
         </div>
         {right}
       </div>
-      <div className="p-5">{children}</div>
+      <div className="p-4 md:p-5">{children}</div>
     </div>
   );
 }
@@ -322,56 +322,60 @@ function TableauCatalogue({ poste, catalogueTemps, catalogueDirect, setQtePoste 
       {Object.entries(catalogueTemps).map(([famId, cat]) => (
         <div key={famId}>
           <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
-          <table className="w-full" style={{ fontSize: 13 }}>
-            <tbody>
-              {cat.items.map((item) => {
-                const qte = poste.quantites[item.id] || 0;
-                return (
-                  <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
-                    <td className="py-2 pr-3" style={{ color: INK }}>
-                      {item.label}
-                    </td>
-                    <td className="py-2 text-right" style={{ width: 90 }}>
-                      <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix="u" width={64} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="overflow-x-auto">
+            <table className="w-full" style={{ fontSize: 13 }}>
+              <tbody>
+                {cat.items.map((item) => {
+                  const qte = poste.quantites[item.id] || 0;
+                  return (
+                    <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                      <td className="py-2 pr-3" style={{ color: INK }}>
+                        {item.label}
+                      </td>
+                      <td className="py-2 text-right" style={{ width: 90 }}>
+                        <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix="u" width={64} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       ))}
 
       {Object.entries(catalogueDirect).map(([famId, cat]) => (
         <div key={famId}>
           <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
-          <table className="w-full" style={{ fontSize: 13 }}>
-            <thead>
-              <tr style={{ color: MUTED, textAlign: "left" }}>
-                <th className="pb-1.5 font-medium">Désignation</th>
-                <th className="pb-1.5 font-medium text-right">Prix / {cat.unite}</th>
-                <th className="pb-1.5 font-medium text-right">Qté</th>
-              </tr>
-            </thead>
-            <tbody>
-              {cat.items.map((item) => {
-                const qte = poste.quantites[item.id] || 0;
-                return (
-                  <tr key={item.id} style={{ borderTop: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
-                    <td className="py-2 pr-3" style={{ color: INK }}>
-                      {item.label}
-                    </td>
-                    <td className="py-2 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                      {euros(item.prix)}
-                    </td>
-                    <td className="py-2 text-right" style={{ width: 90 }}>
-                      <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix={cat.unite} width={64} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="overflow-x-auto">
+            <table className="w-full" style={{ fontSize: 13 }}>
+              <thead>
+                <tr style={{ color: MUTED, textAlign: "left" }}>
+                  <th className="pb-1.5 font-medium">Désignation</th>
+                  <th className="pb-1.5 font-medium text-right">Prix / {cat.unite}</th>
+                  <th className="pb-1.5 font-medium text-right">Qté</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cat.items.map((item) => {
+                  const qte = poste.quantites[item.id] || 0;
+                  return (
+                    <tr key={item.id} style={{ borderTop: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                      <td className="py-2 pr-3" style={{ color: INK }}>
+                        {item.label}
+                      </td>
+                      <td className="py-2 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                        {euros(item.prix)}
+                      </td>
+                      <td className="py-2 text-right" style={{ width: 90 }}>
+                        <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix={cat.unite} width={64} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       ))}
     </div>
@@ -408,7 +412,7 @@ export default function ChiffrageHTMaintenance() {
     saved.affaire || {
       client: "",
       site: "",
-      reference: "QUO-" + new Date().getFullYear() + "-001",
+      reference: "DEV-" + new Date().getFullYear() + "-001",
       contrat: "aucun",
       degressiviteActive: true,
     }
@@ -744,18 +748,18 @@ export default function ChiffrageHTMaintenance() {
   return (
     <div style={{ background: PAPER, minHeight: "100%", fontFamily: "Inter, system-ui, sans-serif", colorScheme: "light" }} className="w-full">
       {/* Header */}
-      <div style={{ background: INK }} className="px-6 py-5">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
+      <div style={{ background: INK }} className="px-4 md:px-6 py-4 md:py-5">
+        <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3">
-            <div style={{ background: AMBER, width: 34, height: 34, borderRadius: 8 }} className="flex items-center justify-center">
+            <div style={{ background: AMBER, width: 34, height: 34, borderRadius: 8 }} className="flex items-center justify-center shrink-0">
               <Zap size={18} color={INK} strokeWidth={2.5} />
             </div>
             <div>
               <div style={{ color: "#fff", fontWeight: 700, fontSize: 16, letterSpacing: 0.2 }}>HT Maintenance</div>
-              <div style={{ color: "#9AA6B2", fontSize: 12 }}>Outil de chiffrage — HTA / BT</div>
+              <div style={{ color: "#9AA6B2", fontSize: 12 }} className="hidden sm:block">Outil de chiffrage — HTA / BT</div>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <span style={{ color: "#9AA6B2", fontSize: 11 }}>
               {syncState === "loading" && "Chargement…"}
               {syncState === "syncing" && "Enregistrement…"}
@@ -769,14 +773,14 @@ export default function ChiffrageHTMaintenance() {
 
       {/* Tabs */}
       <div style={{ background: "#fff", borderBottom: `1px solid ${LINE}` }}>
-        <div className="max-w-6xl mx-auto flex px-6">
+        <div className="max-w-6xl mx-auto flex px-4 md:px-6 overflow-x-auto">
           {tabBtn("chiffrage", "Chiffrage", ClipboardList)}
           {tabBtn("recap", "Récapitulatif", FileText)}
           {tabBtn("parametres", "Paramètres & catalogue", Settings2)}
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto px-6 py-6 flex flex-col gap-5">
+      <div className="max-w-6xl mx-auto px-4 md:px-6 py-5 md:py-6 flex flex-col gap-5">
         {/* ---------------- ONGLET CHIFFRAGE ---------------- */}
         {tab === "chiffrage" && (
           <>
@@ -1000,87 +1004,92 @@ export default function ChiffrageHTMaintenance() {
             </SectionCard>
 
             <SectionCard title="Détail par équipement" icon={ClipboardList}>
-              <table className="w-full" style={{ fontSize: 13 }}>
-                <thead>
-                  <tr style={{ color: MUTED, textAlign: "left" }}>
-                    <th className="pb-2 font-medium">Équipement</th>
-                    <th className="pb-2 font-medium">Poste</th>
-                    <th className="pb-2 font-medium text-right">Qté</th>
-                    <th className="pb-2 font-medium text-right">Montant HT</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {lignesCatalogue.map((l) => (
-                    <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
-                      <td className="py-1.5" style={{ color: INK }}>
-                        {l.label} <span style={{ color: MUTED, fontSize: 11.5 }}>({LABEL_FAMILLE[l.famille]})</span>
-                      </td>
-                      <td className="py-1.5" style={{ color: MUTED }}>
-                        {l.posteNom}
-                      </td>
-                      <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                        {l.qte}
-                      </td>
-                      <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                        {euros(l.montant)}
-                      </td>
+              <div className="overflow-x-auto">
+                <table className="w-full" style={{ fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ color: MUTED, textAlign: "left" }}>
+                      <th className="pb-2 font-medium">Équipement</th>
+                      <th className="pb-2 font-medium">Poste</th>
+                      <th className="pb-2 font-medium text-right">Qté</th>
+                      <th className="pb-2 font-medium text-right">Montant HT</th>
                     </tr>
-                  ))}
-                  {lignesLibresCalc.map(({ ligne: l, montant }) => (
-                    <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
-                      <td className="py-1.5" style={{ color: INK }}>
-                        {l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]}
-                      </td>
-                      <td className="py-1.5" style={{ color: MUTED }}>
-                        —
-                      </td>
-                      <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                        {l.quantite}
-                      </td>
-                      <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                        {euros(montant)}
-                      </td>
-                    </tr>
-                  ))}
-                  {lignesCatalogue.length === 0 && lignesLibresCalc.length === 0 && (
-                    <tr>
-                      <td colSpan={4} className="py-4 text-center" style={{ color: MUTED }}>
-                        Aucun équipement renseigné pour l'instant.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {lignesCatalogue.map((l) => (
+                      <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
+                        <td className="py-1.5" style={{ color: INK }}>
+                          {l.label} <span style={{ color: MUTED, fontSize: 11.5 }}>({LABEL_FAMILLE[l.famille]})</span>
+                        </td>
+                        <td className="py-1.5" style={{ color: MUTED }}>
+                          {l.posteNom}
+                        </td>
+                        <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                          {l.qte}
+                        </td>
+                        <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                          {euros(l.montant)}
+                        </td>
+                      </tr>
+                    ))}
+                    {lignesLibresCalc.map(({ ligne: l, montant }) => (
+                      <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
+                        <td className="py-1.5" style={{ color: INK }}>
+                          {l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]}
+                        </td>
+                        <td className="py-1.5" style={{ color: MUTED }}>
+                          —
+                        </td>
+                        <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                          {l.quantite}
+                        </td>
+                        <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                          {euros(montant)}
+                        </td>
+                      </tr>
+                    ))}
+                    {lignesCatalogue.length === 0 && lignesLibresCalc.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="py-4 text-center" style={{ color: MUTED }}>
+                          Aucun équipement renseigné pour l'instant.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </SectionCard>
 
             <SectionCard title="Répartition par famille" icon={ClipboardList}>
-              <table className="w-full" style={{ fontSize: 13 }}>
-                <thead>
-                  <tr style={{ color: MUTED, textAlign: "left" }}>
-                    <th className="pb-2 font-medium">Famille</th>
-                    <th className="pb-2 font-medium text-right">Montant HT</th>
-                    <th className="pb-2 font-medium text-right">Part</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(parFamille).map(([key, montant]) => (
-                    <tr key={key} style={{ borderTop: `1px solid ${LINE}` }}>
-                      <td className="py-2" style={{ color: INK }}>
-                        {LABEL_FAMILLE[key] || key}
-                      </td>
-                      <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                        {euros(montant)}
-                      </td>
-                      <td className="py-2 text-right" style={{ color: MUTED }}>
-                        {totalAvantCoef > 0 ? Math.round((montant / totalAvantCoef) * 100) : 0}%
-                      </td>
+              <div className="overflow-x-auto">
+                <table className="w-full" style={{ fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ color: MUTED, textAlign: "left" }}>
+                      <th className="pb-2 font-medium">Famille</th>
+                      <th className="pb-2 font-medium text-right">Montant HT</th>
+                      <th className="pb-2 font-medium text-right">Part</th>
                     </tr>
-                  ))}
-                </tbody>
+                  </thead>
+                  <tbody>
+                    {Object.entries(parFamille).map(([key, montant]) => (
+                      <tr key={key} style={{ borderTop: `1px solid ${LINE}` }}>
+                        <td className="py-2" style={{ color: INK }}>
+                          {LABEL_FAMILLE[key] || key}
+                        </td>
+                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                          {euros(montant)}
+                        </td>
+                        <td className="py-2 text-right" style={{ color: MUTED }}>
+                          {totalAvantCoef > 0 ? Math.round((montant / totalAvantCoef) * 100) : 0}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
               </table>
+              </div>
             </SectionCard>
 
             <SectionCard title="Récapitulatif financier" icon={FileText}>
+              <div className="overflow-x-auto">
               <table className="w-full" style={{ fontSize: 13.5 }}>
                 <tbody>
                   <tr style={{ borderBottom: `1px solid ${LINE}` }}>
@@ -1111,6 +1120,7 @@ export default function ChiffrageHTMaintenance() {
                   </tr>
                 </tbody>
               </table>
+              </div>
             </SectionCard>
           </>
         )}
