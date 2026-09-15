@@ -769,9 +769,16 @@ export default function ChiffrageHTMaintenance() {
     const noBorder = { style: "none", size: 0, color: "FFFFFF" };
     const noBorders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder };
 
+    // Largeur totale utile de la page (twips) : A4, marges par défaut ~1440
+    // twips de chaque côté sur une page de 12240 twips → ~9360 twips utiles.
+    const PAGE_WIDTH = 9360;
+    const colWidths = (percents) => percents.map((p) => Math.round((PAGE_WIDTH * p) / 100));
+
     const txt = (text, opts = {}) => new TextRun({ text: String(text), bold: !!opts.bold, color: opts.color });
     const para = (text, opts = {}) => new Paragraph({ alignment: opts.right ? AlignmentType.RIGHT : AlignmentType.LEFT, children: [txt(text, opts)] });
 
+    // --- Tableau infos affaire (2 colonnes) ---
+    const infoW = colWidths([30, 70]);
     const infoRows = [
       ["Référence", affaire.reference || "—"],
       ["Client", affaire.client || "—"],
@@ -782,16 +789,18 @@ export default function ChiffrageHTMaintenance() {
       ([label, value]) =>
         new TableRow({
           children: [
-            new TableCell({ width: { size: 30, type: WidthType.PERCENTAGE }, borders: noBorders, children: [para(label, { bold: true })] }),
-            new TableCell({ borders: noBorders, children: [para(value)] }),
+            new TableCell({ width: { size: infoW[0], type: WidthType.DXA }, borders: noBorders, children: [para(label, { bold: true })] }),
+            new TableCell({ width: { size: infoW[1], type: WidthType.DXA }, borders: noBorders, children: [para(value)] }),
           ],
         })
     );
-    const infoTable = new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: infoRows });
+    const infoTable = new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: infoW, rows: infoRows });
 
-    const headerCell = (text) =>
-      new TableCell({ shading: { type: ShadingType.SOLID, fill: "1B2733" }, children: [para(text, { bold: true, color: "FFFFFF" })] });
-    const dataCell = (text, opts = {}) => new TableCell({ children: [para(text, opts)] });
+    // --- Tableau détail équipements (5 colonnes) ---
+    const equipW = colWidths([28, 15, 22, 10, 25]);
+    const headerCell = (text, i) =>
+      new TableCell({ width: { size: equipW[i], type: WidthType.DXA }, shading: { type: ShadingType.SOLID, fill: "1B2733" }, children: [para(text, { bold: true, color: "FFFFFF" })] });
+    const dataCell = (text, i, opts = {}) => new TableCell({ width: { size: equipW[i], type: WidthType.DXA }, children: [para(text, opts)] });
 
     const equipHeader = new TableRow({ children: ["Désignation", "Poste", "Famille", "Qté", "Montant HT"].map(headerCell) });
     const equipDataRows = [
@@ -799,11 +808,11 @@ export default function ChiffrageHTMaintenance() {
         (l) =>
           new TableRow({
             children: [
-              dataCell(l.label),
-              dataCell(l.posteNom),
-              dataCell(LABEL_FAMILLE[l.famille] || l.famille),
-              dataCell(l.qte, { right: true }),
-              dataCell(euros(l.montant), { right: true }),
+              dataCell(l.label, 0),
+              dataCell(l.posteNom, 1),
+              dataCell(LABEL_FAMILLE[l.famille] || l.famille, 2),
+              dataCell(l.qte, 3, { right: true }),
+              dataCell(euros(l.montant), 4, { right: true }),
             ],
           })
       ),
@@ -811,11 +820,11 @@ export default function ChiffrageHTMaintenance() {
         ({ ligne: l, montant }) =>
           new TableRow({
             children: [
-              dataCell(l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]),
-              dataCell("—"),
-              dataCell(LABEL_FAMILLE[l.famille] || l.famille),
-              dataCell(l.quantite, { right: true }),
-              dataCell(euros(montant), { right: true }),
+              dataCell(l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille], 0),
+              dataCell("—", 1),
+              dataCell(LABEL_FAMILLE[l.famille] || l.famille, 2),
+              dataCell(l.quantite, 3, { right: true }),
+              dataCell(euros(montant), 4, { right: true }),
             ],
           })
       ),
@@ -823,8 +832,10 @@ export default function ChiffrageHTMaintenance() {
     if (equipDataRows.length === 0) {
       equipDataRows.push(new TableRow({ children: [new TableCell({ columnSpan: 5, children: [para("Aucun équipement renseigné")] })] }));
     }
-    const equipTable = new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [equipHeader, ...equipDataRows] });
+    const equipTable = new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: equipW, rows: [equipHeader, ...equipDataRows] });
 
+    // --- Tableau récapitulatif financier (2 colonnes) ---
+    const recapW = colWidths([70, 30]);
     const degressiviteLabel = affaire.degressiviteActive ? `Dégressivité volume (${palierDegressif.label}, ×${palierDegressif.coef})` : "Dégressivité volume (désactivée)";
     const recapRows = [
       ["Nombre total d'équipements", totalEquipements, false],
@@ -837,12 +848,12 @@ export default function ChiffrageHTMaintenance() {
       ([label, value, bold]) =>
         new TableRow({
           children: [
-            new TableCell({ borders: noBorders, children: [para(label, { bold })] }),
-            new TableCell({ borders: noBorders, children: [para(value, { bold, right: true })] }),
+            new TableCell({ width: { size: recapW[0], type: WidthType.DXA }, borders: noBorders, children: [para(label, { bold })] }),
+            new TableCell({ width: { size: recapW[1], type: WidthType.DXA }, borders: noBorders, children: [para(value, { bold, right: true })] }),
           ],
         })
     );
-    const recapTable = new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: recapRows });
+    const recapTable = new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: recapW, rows: recapRows });
 
     const doc = new Document({
       sections: [
