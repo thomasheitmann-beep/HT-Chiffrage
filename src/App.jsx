@@ -33,9 +33,9 @@ const DEVIS_COLLECTION = "ht-chiffrage-devis";
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TARIFS = {
-  technicien: { label: "Technicien (niv. 1-4 standard)", jour: 1400 },
-  expert: { label: "Expert HT/BT", jour: 1600 },
-  ingenieur: { label: "Ingénieur", jour: 1800 },
+  technicien: { label: "Niveau 1-2", jour: 1400 },
+  expert: { label: "Niveau 3-4", jour: 1600 },
+  ingenieur: { label: "Niveau 1-4 (standard)", jour: 1500 },
 };
 
 const DEFAULT_MAJORATIONS = {
@@ -66,68 +66,68 @@ const DEFAULT_CATALOGUE_TEMPS = {
     label: "Cellules HTA",
     marquesRef: "ABB, Schneider Electric (SM6, FLUOKIT, PIX...), Siemens, CEM Gardy, Ormazabal, Pommier",
     items: [
-      { id: "hta-interrupteur", label: "Interrupteur", heures: 1.25, amort: 0 },
-      { id: "hta-interrupteur-rh", label: "Interrupteur avec relais homopolaire", heures: 1.93, amort: 21.18 },
-      { id: "hta-comptage", label: "Comptage", heures: 1.42, amort: 0 },
-      { id: "hta-disj-630", label: "Disjoncteur ≤630A (standard)", heures: 5.17, amort: 57.18 },
-      { id: "hta-disj-800", label: "Disjoncteur ≥800A (gros calibres)", heures: 6.1, amort: 68.57 },
-      { id: "hta-inter-fusible", label: "Inter fusible", heures: 1.42, amort: 0 },
-      { id: "hta-inter-fusible-rh", label: "Inter fusible avec relais homopolaire", heures: 2.15, amort: 23.88 },
-      { id: "hta-contacteur", label: "Contacteur", heures: 2.9, amort: 0 },
-      { id: "hta-contacteur-rp", label: "Contacteur avec relais de protection", heures: 4.0, amort: 42.86 },
+      { id: "hta-interrupteur", label: "Interrupteur", heures: 1.25, amort: 0, niveau: "technicien" },
+      { id: "hta-interrupteur-rh", label: "Interrupteur avec relais homopolaire", heures: 1.93, amort: 21.18, niveau: "technicien" },
+      { id: "hta-comptage", label: "Comptage", heures: 1.42, amort: 0, niveau: "technicien" },
+      { id: "hta-disj-630", label: "Disjoncteur ≤630A (standard)", heures: 5.17, amort: 57.18, niveau: "technicien" },
+      { id: "hta-disj-800", label: "Disjoncteur ≥800A (gros calibres)", heures: 6.1, amort: 68.57, niveau: "technicien" },
+      { id: "hta-inter-fusible", label: "Inter fusible", heures: 1.42, amort: 0, niveau: "technicien" },
+      { id: "hta-inter-fusible-rh", label: "Inter fusible avec relais homopolaire", heures: 2.15, amort: 23.88, niveau: "technicien" },
+      { id: "hta-contacteur", label: "Contacteur", heures: 2.9, amort: 0, niveau: "technicien" },
+      { id: "hta-contacteur-rp", label: "Contacteur avec relais de protection", heures: 4.0, amort: 42.86, niveau: "technicien" },
     ],
   },
   transfo: {
     label: "Transformateurs",
     marquesRef: "",
     items: [
-      { id: "tr-huile-2000", label: "Transfo huile ≤ 2000 kVA", heures: 4.4, amort: 0 },
-      { id: "tr-huile-plus2000", label: "Transfo huile > 2000 kVA", heures: 6.3, amort: 0 },
-      { id: "tr-prelevement", label: "Prélèvement seul", heures: 1.0, amort: 0 },
-      { id: "tr-sec-2000-nc", label: "Transfo sec ≤ 2000 kVA non capoté", heures: 3.7, amort: 58.5 },
-      { id: "tr-sec-plus2000-nc", label: "Transfo sec > 2000 kVA non capoté", heures: 4.64, amort: 73.78 },
-      { id: "tr-sec-2000-c", label: "Transfo sec ≤ 2000 kVA capoté", heures: 5.1, amort: 81.25 },
-      { id: "tr-sec-plus2000-c", label: "Transfo sec > 2000 kVA capoté", heures: 6.3, amort: 100.75 },
+      { id: "tr-huile-2000", label: "Transfo huile ≤ 2000 kVA", heures: 4.4, amort: 0, niveau: "technicien" },
+      { id: "tr-huile-plus2000", label: "Transfo huile > 2000 kVA", heures: 6.3, amort: 0, niveau: "technicien" },
+      { id: "tr-prelevement", label: "Prélèvement seul", heures: 1.0, amort: 0, niveau: "technicien" },
+      { id: "tr-sec-2000-nc", label: "Transfo sec ≤ 2000 kVA non capoté", heures: 3.7, amort: 58.5, niveau: "technicien" },
+      { id: "tr-sec-plus2000-nc", label: "Transfo sec > 2000 kVA non capoté", heures: 4.64, amort: 73.78, niveau: "technicien" },
+      { id: "tr-sec-2000-c", label: "Transfo sec ≤ 2000 kVA capoté", heures: 5.1, amort: 81.25, niveau: "technicien" },
+      { id: "tr-sec-plus2000-c", label: "Transfo sec > 2000 kVA capoté", heures: 6.3, amort: 100.75, niveau: "technicien" },
     ],
   },
   btSecondaire: {
     label: "Disjoncteurs BT — injection secondaire",
     marquesRef: "Schneider (Masterpact, Compact NS/NSX), Eaton/Moeller, ABB SACE, Siemens, Legrand, GE",
     items: [
-      { id: "bts-debro-630", label: "Disj débro ≤630A injection secondaire", heures: 1.2, amort: 25 },
-      { id: "bts-debro-3200", label: "Disj débro ≤3200A injection secondaire", heures: 2.2, amort: 50 },
-      { id: "bts-debro-4000", label: "Disj débro ≥4000A injection secondaire", heures: 3.0, amort: 70 },
-      { id: "bts-fixe-630", label: "Disj fixe ≤630A injection secondaire", heures: 0.85, amort: 16.25 },
-      { id: "bts-fixe-3200", label: "Disj fixe ≤3200A injection secondaire", heures: 1.6, amort: 35 },
-      { id: "bts-fixe-4000", label: "Disj fixe ≥4000A injection secondaire", heures: 1.95, amort: 43.75 },
-      { id: "bts-inter-debro-630", label: "Interrupteur débro ≤630A", heures: 0.71, amort: 0 },
-      { id: "bts-inter-debro-plus630", label: "Interrupteur débro >630A", heures: 1.32, amort: 0 },
-      { id: "bts-inter-fixe-630", label: "Interrupteur fixe ≤630A", heures: 0.36, amort: 0 },
-      { id: "bts-inter-fixe-plus630", label: "Interrupteur fixe >630A", heures: 0.72, amort: 0 },
-      { id: "bts-tiroir-inj", label: "Tiroir injection secondaire", heures: 1.6, amort: 35 },
-      { id: "bts-tiroir-sans", label: "Tiroir sans injection", heures: 1.11, amort: 0 },
+      { id: "bts-debro-630", label: "Disj débro ≤630A injection secondaire", heures: 1.2, amort: 25, niveau: "technicien" },
+      { id: "bts-debro-3200", label: "Disj débro ≤3200A injection secondaire", heures: 2.2, amort: 50, niveau: "technicien" },
+      { id: "bts-debro-4000", label: "Disj débro ≥4000A injection secondaire", heures: 3.0, amort: 70, niveau: "technicien" },
+      { id: "bts-fixe-630", label: "Disj fixe ≤630A injection secondaire", heures: 0.85, amort: 16.25, niveau: "technicien" },
+      { id: "bts-fixe-3200", label: "Disj fixe ≤3200A injection secondaire", heures: 1.6, amort: 35, niveau: "technicien" },
+      { id: "bts-fixe-4000", label: "Disj fixe ≥4000A injection secondaire", heures: 1.95, amort: 43.75, niveau: "technicien" },
+      { id: "bts-inter-debro-630", label: "Interrupteur débro ≤630A", heures: 0.71, amort: 0, niveau: "technicien" },
+      { id: "bts-inter-debro-plus630", label: "Interrupteur débro >630A", heures: 1.32, amort: 0, niveau: "technicien" },
+      { id: "bts-inter-fixe-630", label: "Interrupteur fixe ≤630A", heures: 0.36, amort: 0, niveau: "technicien" },
+      { id: "bts-inter-fixe-plus630", label: "Interrupteur fixe >630A", heures: 0.72, amort: 0, niveau: "technicien" },
+      { id: "bts-tiroir-inj", label: "Tiroir injection secondaire", heures: 1.6, amort: 35, niveau: "technicien" },
+      { id: "bts-tiroir-sans", label: "Tiroir sans injection", heures: 1.11, amort: 0, niveau: "technicien" },
     ],
   },
   btPrimaire: {
     label: "Disjoncteurs BT — injection primaire",
     marquesRef: "",
     items: [
-      { id: "btp-debro-630", label: "Disj débro ≤630A injection primaire", heures: 2.86, amort: 112.36 },
-      { id: "btp-debro-3200", label: "Disj débro ≤3200A injection primaire", heures: 3.77, amort: 151.54 },
-      { id: "btp-debro-4000", label: "Disj débro ≥4000A injection primaire", heures: 6.57, amort: 272.09 },
-      { id: "btp-magneto-1250", label: "Disj magnéto-thermique ≤1250A primaire", heures: 6.5, amort: 258.31 },
-      { id: "btp-magneto-plus1250", label: "Disj magnéto-thermique >1250A primaire", heures: 7.5, amort: 301.36 },
+      { id: "btp-debro-630", label: "Disj débro ≤630A injection primaire", heures: 2.86, amort: 112.36, niveau: "technicien" },
+      { id: "btp-debro-3200", label: "Disj débro ≤3200A injection primaire", heures: 3.77, amort: 151.54, niveau: "technicien" },
+      { id: "btp-debro-4000", label: "Disj débro ≥4000A injection primaire", heures: 6.57, amort: 272.09, niveau: "technicien" },
+      { id: "btp-magneto-1250", label: "Disj magnéto-thermique ≤1250A primaire", heures: 6.5, amort: 258.31, niveau: "technicien" },
+      { id: "btp-magneto-plus1250", label: "Disj magnéto-thermique >1250A primaire", heures: 7.5, amort: 301.36, niveau: "technicien" },
     ],
   },
   pfcRec: {
     label: "Divers — compensateurs et redresseurs",
     marquesRef: "",
     items: [
-      { id: "pfc-bt-5", label: "PFC BT : 400V ≤ 5 gradins", heures: 2.8, amort: 0 },
-      { id: "pfc-bt-plus5", label: "PFC BT : 400V > 5 gradins", heures: 4.0, amort: 0 },
-      { id: "pfc-hta", label: "PFC HTA : 20kV ≤1500kvar / 5.5kV ≤150kvar", heures: 8.0, amort: 0 },
-      { id: "rec-c13", label: "REC type C13-100", heures: 1.56, amort: 0 },
-      { id: "rec-sces", label: "REC type SCES", heures: 2.8, amort: 0 },
+      { id: "pfc-bt-5", label: "PFC BT : 400V ≤ 5 gradins", heures: 2.8, amort: 0, niveau: "technicien" },
+      { id: "pfc-bt-plus5", label: "PFC BT : 400V > 5 gradins", heures: 4.0, amort: 0, niveau: "technicien" },
+      { id: "pfc-hta", label: "PFC HTA : 20kV ≤1500kvar / 5.5kV ≤150kvar", heures: 8.0, amort: 0, niveau: "technicien" },
+      { id: "rec-c13", label: "REC type C13-100", heures: 1.56, amort: 0, niveau: "technicien" },
+      { id: "rec-sces", label: "REC type SCES", heures: 2.8, amort: 0, niveau: "technicien" },
     ],
   },
 };
@@ -701,12 +701,12 @@ export default function ChiffrageHTMaintenance() {
   const lignesCatalogue = useMemo(() => {
     const out = [];
     postesEquipement.forEach((poste) => {
-      const tarif = tarifs[poste.niveauTechnicien];
       const majoration = majorations[poste.typeJournee];
       Object.entries(catalogueTemps).forEach(([famId, cat]) => {
         cat.items.forEach((item) => {
           const qte = poste.quantites[item.id] || 0;
           if (qte > 0) {
+            const tarif = tarifs[item.niveau] || tarifs.technicien;
             const joursHomme = (item.heures / heuresJour) * qte;
             const montantUnitaire = (item.heures / heuresJour) * tarif.jour * majoration.coef + item.amort;
             out.push({ id: `${poste.id}-${item.id}`, posteId: poste.id, posteNom: poste.nom, famille: famId, label: item.label, qte, joursHomme, montant: montantUnitaire * qte });
@@ -1025,18 +1025,10 @@ export default function ChiffrageHTMaintenance() {
                   </div>
                 }
               >
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
                   <div>
                     <label style={{ fontSize: 11, color: MUTED }}>Nom du poste</label>
                     <TextField value={poste.nom} onChange={(v) => updatePosteEquipement(poste.id, { nom: v })} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, color: MUTED }}>Technicien</label>
-                    <Select
-                      value={poste.niveauTechnicien}
-                      onChange={(v) => updatePosteEquipement(poste.id, { niveauTechnicien: v })}
-                      options={Object.entries(tarifs).map(([k, v]) => ({ value: k, label: `${v.label} — ${euros(v.jour)}/j` }))}
-                    />
                   </div>
                   <div>
                     <label style={{ fontSize: 11, color: MUTED }}>Journée</label>
@@ -1390,8 +1382,8 @@ export default function ChiffrageHTMaintenance() {
             </SectionCard>
 
             <SectionCard
-              title="Catalogue équipements — heures et amortissement"
-              subtitle="Prix de revient affiché = (heures ÷ heures/jour) × tarif jour Technicien (semaine) + amortissement — varie selon le technicien et la journée choisis dans le chiffrage"
+              title="Catalogue équipements — heures, amortissement et niveau"
+              subtitle="Prix de revient = (heures ÷ heures/jour) × tarif du niveau choisi (semaine) + amortissement — le niveau détermine le tarif appliqué dans le chiffrage"
               icon={ClipboardList}
             >
               <div className="flex flex-col gap-5">
@@ -1400,16 +1392,18 @@ export default function ChiffrageHTMaintenance() {
                     <div style={{ fontWeight: 600, color: INK, fontSize: 13 }}>{cat.label}</div>
                     {cat.marquesRef && <div style={{ fontSize: 11.5, color: MUTED, marginBottom: 8 }}>{cat.marquesRef}</div>}
                     <div className="flex flex-col gap-1.5 mt-2">
-                      <div className="grid grid-cols-5 gap-3" style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>
+                      <div className="grid grid-cols-6 gap-3" style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>
                         <span style={{ gridColumn: "span 2" }}></span>
                         <span>Heures</span>
                         <span>Amort.</span>
+                        <span>Niveau</span>
                         <span>Prix de revient</span>
                       </div>
                       {cat.items.map((item, i) => {
-                        const prixRevient = (item.heures / heuresJour) * tarifs.technicien.jour + item.amort;
+                        const tarifItem = tarifs[item.niveau] || tarifs.technicien;
+                        const prixRevient = (item.heures / heuresJour) * tarifItem.jour + item.amort;
                         return (
-                          <div key={item.id} className="grid grid-cols-5 gap-3 items-center">
+                          <div key={item.id} className="grid grid-cols-6 gap-3 items-center">
                             <span style={{ fontSize: 13, color: INK, gridColumn: "span 2" }}>{item.label}</span>
                             <NumberField
                               value={item.heures}
@@ -1424,6 +1418,13 @@ export default function ChiffrageHTMaintenance() {
                                 setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, amort: v } : it)) } }))
                               }
                               suffix="€ amort."
+                            />
+                            <Select
+                              value={item.niveau || "technicien"}
+                              onChange={(v) =>
+                                setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, niveau: v } : it)) } }))
+                              }
+                              options={Object.entries(tarifs).map(([k, v]) => ({ value: k, label: v.label }))}
                             />
                             <span style={{ fontSize: 13, fontWeight: 600, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(prixRevient)}</span>
                           </div>
