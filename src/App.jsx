@@ -1389,32 +1389,46 @@ export default function ChiffrageHTMaintenance() {
               </div>
             </SectionCard>
 
-            <SectionCard title="Catalogue équipements — heures et amortissement" subtitle="Prix de revient = (heures ÷ heures/jour) × tarif jour × majoration + amortissement" icon={ClipboardList}>
+            <SectionCard
+              title="Catalogue équipements — heures et amortissement"
+              subtitle="Prix de revient affiché = (heures ÷ heures/jour) × tarif jour Technicien (semaine) + amortissement — varie selon le technicien et la journée choisis dans le chiffrage"
+              icon={ClipboardList}
+            >
               <div className="flex flex-col gap-5">
                 {Object.entries(catalogueTemps).map(([key, cat]) => (
                   <div key={key}>
                     <div style={{ fontWeight: 600, color: INK, fontSize: 13 }}>{cat.label}</div>
                     {cat.marquesRef && <div style={{ fontSize: 11.5, color: MUTED, marginBottom: 8 }}>{cat.marquesRef}</div>}
                     <div className="flex flex-col gap-1.5 mt-2">
-                      {cat.items.map((item, i) => (
-                        <div key={item.id} className="grid grid-cols-4 gap-3 items-center">
-                          <span style={{ fontSize: 13, color: INK, gridColumn: "span 2" }}>{item.label}</span>
-                          <NumberField
-                            value={item.heures}
-                            onChange={(v) =>
-                              setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, heures: v } : it)) } }))
-                            }
-                            suffix="h/u"
-                          />
-                          <NumberField
-                            value={item.amort}
-                            onChange={(v) =>
-                              setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, amort: v } : it)) } }))
-                            }
-                            suffix="€ amort."
-                          />
-                        </div>
-                      ))}
+                      <div className="grid grid-cols-5 gap-3" style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>
+                        <span style={{ gridColumn: "span 2" }}></span>
+                        <span>Heures</span>
+                        <span>Amort.</span>
+                        <span>Prix de revient</span>
+                      </div>
+                      {cat.items.map((item, i) => {
+                        const prixRevient = (item.heures / heuresJour) * tarifs.technicien.jour + item.amort;
+                        return (
+                          <div key={item.id} className="grid grid-cols-5 gap-3 items-center">
+                            <span style={{ fontSize: 13, color: INK, gridColumn: "span 2" }}>{item.label}</span>
+                            <NumberField
+                              value={item.heures}
+                              onChange={(v) =>
+                                setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, heures: v } : it)) } }))
+                              }
+                              suffix="h/u"
+                            />
+                            <NumberField
+                              value={item.amort}
+                              onChange={(v) =>
+                                setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, amort: v } : it)) } }))
+                              }
+                              suffix="€ amort."
+                            />
+                            <span style={{ fontSize: 13, fontWeight: 600, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(prixRevient)}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 ))}
