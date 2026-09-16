@@ -416,13 +416,20 @@ export default function ChiffrageHTMaintenance() {
     }
   });
 
-  const [tarifs, setTarifs] = useState(saved.tarifs || DEFAULT_TARIFS);
+  // Vérifie que les données enregistrées (cache local ou cloud) correspondent
+  // au schéma actuel — sinon on repart des valeurs par défaut à jour plutôt
+  // que de charger d'anciennes structures incompatibles (ex: anciens tarifs
+  // multi-niveaux, ancien champ "heures" unique par équipement).
+  const tarifsValides = (t) => !!(t && t.expert && Object.keys(t).length === 1);
+  const catalogueTempsValide = (c) => !!(c && c.hta && c.hta.items && c.hta.items[0] && c.hta.items[0].heuresSimple != null);
+
+  const [tarifs, setTarifs] = useState(tarifsValides(saved.tarifs) ? saved.tarifs : DEFAULT_TARIFS);
   const [majorations, setMajorations] = useState(saved.majorations || DEFAULT_MAJORATIONS);
   const [degressivite, setDegressivite] = useState(saved.degressivite || DEFAULT_DEGRESSIVITE);
   const [coefContrat, setCoefContrat] = useState(saved.coefContrat || DEFAULT_COEF_CONTRAT);
   const [heuresJour, setHeuresJour] = useState(saved.heuresJour ?? 7);
 
-  const [catalogueTemps, setCatalogueTemps] = useState(saved.catalogueTemps || DEFAULT_CATALOGUE_TEMPS);
+  const [catalogueTemps, setCatalogueTemps] = useState(catalogueTempsValide(saved.catalogueTemps) ? saved.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
   const [catalogueCoef, setCatalogueCoef] = useState(saved.catalogueCoef || DEFAULT_CATALOGUE_COEF);
   const [catalogueDirect, setCatalogueDirect] = useState(saved.catalogueDirect || DEFAULT_CATALOGUE_DIRECT);
 
@@ -492,12 +499,12 @@ export default function ChiffrageHTMaintenance() {
       .then((snap) => {
         if (snap.exists()) {
           const data = snap.data();
-          if (data.tarifs) setTarifs(data.tarifs);
+          setTarifs(tarifsValides(data.tarifs) ? data.tarifs : DEFAULT_TARIFS);
           if (data.majorations) setMajorations(data.majorations);
           if (data.degressivite) setDegressivite(data.degressivite);
           if (data.coefContrat) setCoefContrat(data.coefContrat);
           if (data.heuresJour != null) setHeuresJour(data.heuresJour);
-          if (data.catalogueTemps) setCatalogueTemps(data.catalogueTemps);
+          setCatalogueTemps(catalogueTempsValide(data.catalogueTemps) ? data.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
           if (data.catalogueCoef) setCatalogueCoef(data.catalogueCoef);
           if (data.catalogueDirect) setCatalogueDirect(data.catalogueDirect);
         }
