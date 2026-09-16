@@ -1424,40 +1424,50 @@ export default function ChiffrageHTMaintenance() {
               subtitle="Niveau 1-2 = temps simple + préparation, Niveau 3-4 = temps complexe + préparation, Niveau 1-4 = tout. Prix de revient = (heures du niveau ÷ heures/jour) × tarif jour + amortissement"
               icon={ClipboardList}
             >
-              <div className="flex flex-col gap-5">
+              <div className="flex flex-col gap-6">
                 {Object.entries(catalogueTemps).map(([key, cat]) => (
                   <div key={key}>
                     <div style={{ fontWeight: 600, color: INK, fontSize: 13 }}>{cat.label}</div>
                     {cat.marquesRef && <div style={{ fontSize: 11.5, color: MUTED, marginBottom: 8 }}>{cat.marquesRef}</div>}
-                    <div className="flex flex-col gap-1.5 mt-2">
-                      <div className="grid grid-cols-8 gap-2" style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>
-                        <span style={{ gridColumn: "span 2" }}></span>
-                        <span>Simple (1-2)</span>
-                        <span>Complexe (3-4)</span>
-                        <span>Prépa.</span>
-                        <span>Amort.</span>
-                        <span>Niveau défaut</span>
-                        <span>Prix (défaut)</span>
-                      </div>
+                    <div className="flex flex-col gap-3 mt-2">
                       {cat.items.map((item, i) => {
                         const heuresDefaut = heuresPourNiveau(item, item.niveauDefaut || "complet");
                         const prixRevient = (heuresDefaut / heuresJour) * tarifs.expert.jour + item.amort;
                         const majItem = (patch) =>
                           setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, ...patch } : it)) } }));
                         return (
-                          <div key={item.id} className="grid grid-cols-8 gap-2 items-center">
-                            <span style={{ fontSize: 13, color: INK, gridColumn: "span 2" }}>{item.label}</span>
-                            <NumberField value={item.heuresSimple} onChange={(v) => majItem({ heuresSimple: v })} suffix="h" width={62} />
-                            <NumberField value={item.heuresComplexe} onChange={(v) => majItem({ heuresComplexe: v })} suffix="h" width={62} />
-                            <NumberField value={item.heuresPrepa} onChange={(v) => majItem({ heuresPrepa: v })} suffix="h" width={62} />
-                            <NumberField value={item.amort} onChange={(v) => majItem({ amort: v })} suffix="€" width={62} />
-                            <Select
-                              value={item.niveauDefaut || "complet"}
-                              onChange={(v) => majItem({ niveauDefaut: v })}
-                              options={Object.entries(NIVEAUX_PRESTATION).map(([k, label]) => ({ value: k, label }))}
-                              style={{ fontSize: 12, padding: "4px 6px" }}
-                            />
-                            <span style={{ fontSize: 13, fontWeight: 600, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(prixRevient)}</span>
+                          <div key={item.id} style={{ border: `1px solid ${LINE}`, borderRadius: 8 }} className="p-3">
+                            <div style={{ fontSize: 13.5, fontWeight: 600, color: INK, marginBottom: 10 }}>{item.label}</div>
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED }}>Simple (1-2)</label>
+                                <NumberField value={item.heuresSimple} onChange={(v) => majItem({ heuresSimple: v })} suffix="h" width="100%" />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED }}>Complexe (3-4)</label>
+                                <NumberField value={item.heuresComplexe} onChange={(v) => majItem({ heuresComplexe: v })} suffix="h" width="100%" />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED }}>Préparation</label>
+                                <NumberField value={item.heuresPrepa} onChange={(v) => majItem({ heuresPrepa: v })} suffix="h" width="100%" />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED }}>Amortissement</label>
+                                <NumberField value={item.amort} onChange={(v) => majItem({ amort: v })} suffix="€" width="100%" />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED }}>Niveau par défaut</label>
+                                <Select
+                                  value={item.niveauDefaut || "complet"}
+                                  onChange={(v) => majItem({ niveauDefaut: v })}
+                                  options={Object.entries(NIVEAUX_PRESTATION).map(([k, label]) => ({ value: k, label }))}
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED }}>Prix de revient (défaut)</label>
+                                <div style={{ fontSize: 15, fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums", padding: "5px 0" }}>{euros(prixRevient)}</div>
+                              </div>
+                            </div>
                           </div>
                         );
                       })}
