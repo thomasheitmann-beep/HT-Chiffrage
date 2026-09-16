@@ -1011,21 +1011,21 @@ export default function ChiffrageHTMaintenance() {
             >
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
                 <div>
-                  <label style={{ fontSize: 11, color: MUTED }}>Référence</label>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Référence</label>
                   <TextField value={affaire.reference} onChange={(v) => setAffaire((a) => ({ ...a, reference: v }))} />
                 </div>
                 <div>
-                  <label style={{ fontSize: 11, color: MUTED }}>Client</label>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Client</label>
                   <TextField value={affaire.client} onChange={(v) => setAffaire((a) => ({ ...a, client: v }))} placeholder="Nom du client" />
                 </div>
                 <div>
-                  <label style={{ fontSize: 11, color: MUTED }}>Site</label>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Site</label>
                   <TextField value={affaire.site} onChange={(v) => setAffaire((a) => ({ ...a, site: v }))} placeholder="Site / adresse" />
                 </div>
               </div>
               <div className="flex items-end gap-6">
                 <div>
-                  <label style={{ fontSize: 11, color: MUTED }}>Cadre contractuel</label>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Cadre contractuel</label>
                   <Select
                     value={affaire.contrat}
                     onChange={(v) => setAffaire((a) => ({ ...a, contrat: v }))}
@@ -1065,11 +1065,11 @@ export default function ChiffrageHTMaintenance() {
               >
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
                   <div>
-                    <label style={{ fontSize: 11, color: MUTED }}>Nom du poste</label>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Nom du poste</label>
                     <TextField value={poste.nom} onChange={(v) => updatePosteEquipement(poste.id, { nom: v })} />
                   </div>
                   <div>
-                    <label style={{ fontSize: 11, color: MUTED }}>Journée</label>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Journée</label>
                     <Select
                       value={poste.typeJournee}
                       onChange={(v) => updatePosteEquipement(poste.id, { typeJournee: v })}
@@ -1113,32 +1113,32 @@ export default function ChiffrageHTMaintenance() {
                     <div key={l.id} style={{ border: `1px solid ${LINE}`, borderRadius: 8 }} className="p-4">
                       <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
                         <div className="md:col-span-2">
-                          <label style={{ fontSize: 11, color: MUTED }}>Type</label>
+                          <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Type</label>
                           <Select value={l.famille} onChange={(v) => updateLigneLibre(l.id, { famille: v })} options={FAMILLES_LIBRES.map((f) => ({ value: f.id, label: f.label }))} />
                         </div>
 
                         {famille.type === "coef" && (
                           <div className="md:col-span-3">
-                            <label style={{ fontSize: 11, color: MUTED }}>{catalogueCoef[l.famille].critereLabel}</label>
+                            <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>{catalogueCoef[l.famille].critereLabel}</label>
                             <NumberField value={l.prixAchatUnitaire} onChange={(v) => updateLigneLibre(l.id, { prixAchatUnitaire: v })} width="100%" />
                           </div>
                         )}
 
                         {famille.type === "manuel" && (
                           <div className="md:col-span-3">
-                            <label style={{ fontSize: 11, color: MUTED }}>Libellé</label>
+                            <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Libellé</label>
                             <TextField value={l.libelleManuel} onChange={(v) => updateLigneLibre(l.id, { libelleManuel: v })} placeholder="Description du poste" />
                           </div>
                         )}
 
                         <div className="md:col-span-1">
-                          <label style={{ fontSize: 11, color: MUTED }}>Qté</label>
+                          <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Qté</label>
                           <NumberField value={l.quantite} onChange={(v) => updateLigneLibre(l.id, { quantite: v })} width="100%" />
                         </div>
 
                         {famille.type === "manuel" && (
                           <div className="md:col-span-1">
-                            <label style={{ fontSize: 11, color: MUTED }}>j/u</label>
+                            <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>j/u</label>
                             <NumberField value={l.joursManuel} onChange={(v) => updateLigneLibre(l.id, { joursManuel: v })} width="100%" />
                           </div>
                         )}
@@ -1146,7 +1146,7 @@ export default function ChiffrageHTMaintenance() {
                         {famille.type === "manuel" && (
                           <>
                             <div className="md:col-span-2">
-                              <label style={{ fontSize: 11, color: MUTED }}>Technicien (préremplit le prix)</label>
+                              <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Technicien (préremplit le prix)</label>
                               <Select
                                 value={l.niveauTechnicien}
                                 onChange={(v) => updateLigneLibre(l.id, { niveauTechnicien: v, prixJour: tarifs[v].jour })}
@@ -1154,11 +1154,11 @@ export default function ChiffrageHTMaintenance() {
                               />
                             </div>
                             <div className="md:col-span-1">
-                              <label style={{ fontSize: 11, color: MUTED }}>Prix / jour</label>
+                              <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Prix / jour</label>
                               <NumberField value={l.prixJour} onChange={(v) => updateLigneLibre(l.id, { prixJour: v })} suffix="€" width="100%" />
                             </div>
                             <div className="md:col-span-1">
-                              <label style={{ fontSize: 11, color: MUTED }}>Journée</label>
+                              <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Journée</label>
                               <Select value={l.typeJournee} onChange={(v) => updateLigneLibre(l.id, { typeJournee: v })} options={Object.entries(majorations).map(([k, v]) => ({ value: k, label: v.label }))} />
                             </div>
                           </>
@@ -1369,9 +1369,9 @@ export default function ChiffrageHTMaintenance() {
                   <div key={key} style={{ border: `1px solid ${LINE}`, borderRadius: 8 }} className="p-4">
                     <div style={{ fontWeight: 600, color: INK, marginBottom: 10 }}>{t.label}</div>
                     <div className="flex flex-col gap-2">
-                      <label style={{ fontSize: 11, color: MUTED }}>Prix / jour</label>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Prix / jour</label>
                       <NumberField value={t.jour} onChange={(v) => setTarifs((s) => ({ ...s, [key]: { ...s[key], jour: v } }))} suffix="€" width="100%" />
-                      <label style={{ fontSize: 11, color: MUTED }}>Prix / demi-journée (jour ÷ 2 × 1,2)</label>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Prix / demi-journée (jour ÷ 2 × 1,2)</label>
                       <div style={{ fontSize: 13, color: INK, fontWeight: 600, padding: "5px 0" }}>{euros((t.jour / 2) * 1.2)}</div>
                     </div>
                   </div>
@@ -1390,7 +1390,7 @@ export default function ChiffrageHTMaintenance() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 {Object.entries(majorations).map(([key, m]) => (
                   <div key={key}>
-                    <label style={{ fontSize: 11, color: MUTED }}>{m.label}</label>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>{m.label}</label>
                     <NumberField value={m.coef} onChange={(v) => setMajorations((s) => ({ ...s, [key]: { ...s[key], coef: v } }))} suffix="×" width="100%" />
                   </div>
                 ))}
@@ -1440,23 +1440,23 @@ export default function ChiffrageHTMaintenance() {
                             <div style={{ fontSize: 13.5, fontWeight: 600, color: INK, marginBottom: 10 }}>{item.label}</div>
                             <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                               <div>
-                                <label style={{ fontSize: 11, color: MUTED }}>Simple (1-2)</label>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Simple (1-2)</label>
                                 <NumberField value={item.heuresSimple} onChange={(v) => majItem({ heuresSimple: v })} suffix="h" width="100%" />
                               </div>
                               <div>
-                                <label style={{ fontSize: 11, color: MUTED }}>Complexe (3-4)</label>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Complexe (3-4)</label>
                                 <NumberField value={item.heuresComplexe} onChange={(v) => majItem({ heuresComplexe: v })} suffix="h" width="100%" />
                               </div>
                               <div>
-                                <label style={{ fontSize: 11, color: MUTED }}>Préparation</label>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Préparation</label>
                                 <NumberField value={item.heuresPrepa} onChange={(v) => majItem({ heuresPrepa: v })} suffix="h" width="100%" />
                               </div>
                               <div>
-                                <label style={{ fontSize: 11, color: MUTED }}>Amortissement</label>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Amortissement</label>
                                 <NumberField value={item.amort} onChange={(v) => majItem({ amort: v })} suffix="€" width="100%" />
                               </div>
                               <div>
-                                <label style={{ fontSize: 11, color: MUTED }}>Niveau par défaut</label>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Niveau par défaut</label>
                                 <Select
                                   value={item.niveauDefaut || "complet"}
                                   onChange={(v) => majItem({ niveauDefaut: v })}
@@ -1464,7 +1464,7 @@ export default function ChiffrageHTMaintenance() {
                                 />
                               </div>
                               <div>
-                                <label style={{ fontSize: 11, color: MUTED }}>Prix de revient (défaut)</label>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Prix de revient (défaut)</label>
                                 <div style={{ fontSize: 15, fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums", padding: "5px 0" }}>{euros(prixRevient)}</div>
                               </div>
                             </div>
