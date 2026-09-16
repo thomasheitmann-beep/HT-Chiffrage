@@ -1226,41 +1226,65 @@ export default function ChiffrageHTMaintenance() {
               </div>
             </SectionCard>
 
-            <SectionCard title="Détail par équipement" icon={ClipboardList}>
+            {postesEquipement.map((poste) => {
+              const lignesPoste = lignesCatalogue.filter((l) => l.posteId === poste.id);
+              const totalPoste = lignesPoste.reduce((s, l) => s + l.montant, 0);
+              if (lignesPoste.length === 0) return null;
+              return (
+                <SectionCard key={poste.id} title={poste.nom} subtitle={`${lignesPoste.length} équipement${lignesPoste.length > 1 ? "s" : ""}`} icon={ClipboardList}>
+                  <div className="overflow-x-auto">
+                    <table className="w-full" style={{ fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ color: MUTED, textAlign: "left" }}>
+                          <th className="pb-2 font-medium">Équipement</th>
+                          <th className="pb-2 font-medium text-right">Qté</th>
+                          <th className="pb-2 font-medium text-right">Montant HT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {lignesPoste.map((l) => (
+                          <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
+                            <td className="py-1.5" style={{ color: INK }}>
+                              {l.label} <span style={{ color: MUTED, fontSize: 11.5 }}>({LABEL_FAMILLE[l.famille]})</span>
+                            </td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {l.qte}
+                            </td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {euros(l.montant)}
+                            </td>
+                          </tr>
+                        ))}
+                        <tr style={{ borderTop: `2px solid ${INK}` }}>
+                          <td className="pt-2" style={{ fontWeight: 700, color: INK }} colSpan={2}>
+                            Sous-total {poste.nom}
+                          </td>
+                          <td className="pt-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>
+                            {euros(totalPoste)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </SectionCard>
+              );
+            })}
+
+            <SectionCard title="Lignes libres" subtitle="Batteries, composants, postes manuels — non rattachés à un poste d'équipements" icon={ClipboardList}>
               <div className="overflow-x-auto">
                 <table className="w-full" style={{ fontSize: 13 }}>
                   <thead>
                     <tr style={{ color: MUTED, textAlign: "left" }}>
-                      <th className="pb-2 font-medium">Équipement</th>
-                      <th className="pb-2 font-medium">Poste</th>
+                      <th className="pb-2 font-medium">Désignation</th>
                       <th className="pb-2 font-medium text-right">Qté</th>
                       <th className="pb-2 font-medium text-right">Montant HT</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {lignesCatalogue.map((l) => (
-                      <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
-                        <td className="py-1.5" style={{ color: INK }}>
-                          {l.label} <span style={{ color: MUTED, fontSize: 11.5 }}>({LABEL_FAMILLE[l.famille]})</span>
-                        </td>
-                        <td className="py-1.5" style={{ color: MUTED }}>
-                          {l.posteNom}
-                        </td>
-                        <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                          {l.qte}
-                        </td>
-                        <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                          {euros(l.montant)}
-                        </td>
-                      </tr>
-                    ))}
                     {lignesLibresCalc.map(({ ligne: l, montant }) => (
                       <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
                         <td className="py-1.5" style={{ color: INK }}>
                           {l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]}
-                        </td>
-                        <td className="py-1.5" style={{ color: MUTED }}>
-                          —
                         </td>
                         <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
                           {l.quantite}
@@ -1270,10 +1294,10 @@ export default function ChiffrageHTMaintenance() {
                         </td>
                       </tr>
                     ))}
-                    {lignesCatalogue.length === 0 && lignesLibresCalc.length === 0 && (
+                    {lignesLibresCalc.length === 0 && (
                       <tr>
-                        <td colSpan={4} className="py-4 text-center" style={{ color: MUTED }}>
-                          Aucun équipement renseigné pour l'instant.
+                        <td colSpan={3} className="py-4 text-center" style={{ color: MUTED }}>
+                          Aucune ligne libre.
                         </td>
                       </tr>
                     )}
