@@ -33,9 +33,7 @@ const DEVIS_COLLECTION = "ht-chiffrage-devis";
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TARIFS = {
-  technicien: { label: "Niveau 1-2", jour: 1400 },
-  expert: { label: "Niveau 3-4", jour: 1600 },
-  ingenieur: { label: "Niveau 1-4 (standard)", jour: 1500 },
+  expert: { label: "Expert HT/BT", jour: 1600 },
 };
 
 const DEFAULT_MAJORATIONS = {
@@ -61,73 +59,77 @@ const DEFAULT_COEF_CONTRAT = {
 };
 
 // heures = heures nv1-2 + heures nv3-4 + heures prépa (cumulées) — amort = amortissement matériel (€, fixe)
+// Pour chaque équipement : heuresSimple (niveau 1-2), heuresComplexe (niveau
+// 3-4) et heuresPrepa (préparation, comptée dans tous les niveaux), repris
+// du fichier source. niveauDefaut = niveau de prestation appliqué par défaut
+// dans un chiffrage (modifiable équipement par équipement dans le Chiffrage).
 const DEFAULT_CATALOGUE_TEMPS = {
   hta: {
     label: "Cellules HTA",
     marquesRef: "ABB, Schneider Electric (SM6, FLUOKIT, PIX...), Siemens, CEM Gardy, Ormazabal, Pommier",
     items: [
-      { id: "hta-interrupteur", label: "Interrupteur", heures: 1.25, amort: 0, niveau: "technicien" },
-      { id: "hta-interrupteur-rh", label: "Interrupteur avec relais homopolaire", heures: 1.93, amort: 21.18, niveau: "technicien" },
-      { id: "hta-comptage", label: "Comptage", heures: 1.42, amort: 0, niveau: "technicien" },
-      { id: "hta-disj-630", label: "Disjoncteur ≤630A (standard)", heures: 5.17, amort: 57.18, niveau: "technicien" },
-      { id: "hta-disj-800", label: "Disjoncteur ≥800A (gros calibres)", heures: 6.1, amort: 68.57, niveau: "technicien" },
-      { id: "hta-inter-fusible", label: "Inter fusible", heures: 1.42, amort: 0, niveau: "technicien" },
-      { id: "hta-inter-fusible-rh", label: "Inter fusible avec relais homopolaire", heures: 2.15, amort: 23.88, niveau: "technicien" },
-      { id: "hta-contacteur", label: "Contacteur", heures: 2.9, amort: 0, niveau: "technicien" },
-      { id: "hta-contacteur-rp", label: "Contacteur avec relais de protection", heures: 4.0, amort: 42.86, niveau: "technicien" },
+      { id: "hta-interrupteur", label: "Interrupteur", heuresSimple: 0.7, heuresComplexe: 0.45, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "hta-interrupteur-rh", label: "Interrupteur avec relais homopolaire", heuresSimple: 0.7, heuresComplexe: 1.03, heuresPrepa: 0.2, amort: 21.18, niveauDefaut: "complet" },
+      { id: "hta-comptage", label: "Comptage", heuresSimple: 0.6, heuresComplexe: 0.72, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "hta-disj-630", label: "Disjoncteur ≤630A (standard)", heuresSimple: 0.93, heuresComplexe: 3.74, heuresPrepa: 0.5, amort: 57.18, niveauDefaut: "complet" },
+      { id: "hta-disj-800", label: "Disjoncteur ≥800A (gros calibres)", heuresSimple: 1.68, heuresComplexe: 3.92, heuresPrepa: 0.5, amort: 68.57, niveauDefaut: "complet" },
+      { id: "hta-inter-fusible", label: "Inter fusible", heuresSimple: 0.6, heuresComplexe: 0.72, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "hta-inter-fusible-rh", label: "Inter fusible avec relais homopolaire", heuresSimple: 0.6, heuresComplexe: 1.35, heuresPrepa: 0.2, amort: 23.88, niveauDefaut: "complet" },
+      { id: "hta-contacteur", label: "Contacteur", heuresSimple: 0.9, heuresComplexe: 1.9, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "hta-contacteur-rp", label: "Contacteur avec relais de protection", heuresSimple: 0.9, heuresComplexe: 2.6, heuresPrepa: 0.5, amort: 42.86, niveauDefaut: "complet" },
     ],
   },
   transfo: {
     label: "Transformateurs",
     marquesRef: "",
     items: [
-      { id: "tr-huile-2000", label: "Transfo huile ≤ 2000 kVA", heures: 4.4, amort: 0, niveau: "technicien" },
-      { id: "tr-huile-plus2000", label: "Transfo huile > 2000 kVA", heures: 6.3, amort: 0, niveau: "technicien" },
-      { id: "tr-prelevement", label: "Prélèvement seul", heures: 1.0, amort: 0, niveau: "technicien" },
-      { id: "tr-sec-2000-nc", label: "Transfo sec ≤ 2000 kVA non capoté", heures: 3.7, amort: 58.5, niveau: "technicien" },
-      { id: "tr-sec-plus2000-nc", label: "Transfo sec > 2000 kVA non capoté", heures: 4.64, amort: 73.78, niveau: "technicien" },
-      { id: "tr-sec-2000-c", label: "Transfo sec ≤ 2000 kVA capoté", heures: 5.1, amort: 81.25, niveau: "technicien" },
-      { id: "tr-sec-plus2000-c", label: "Transfo sec > 2000 kVA capoté", heures: 6.3, amort: 100.75, niveau: "technicien" },
+      { id: "tr-huile-2000", label: "Transfo huile ≤ 2000 kVA", heuresSimple: 2.58, heuresComplexe: 1.72, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "tr-huile-plus2000", label: "Transfo huile > 2000 kVA", heuresSimple: 3.64, heuresComplexe: 2.56, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "tr-prelevement", label: "Prélèvement seul", heuresSimple: 0, heuresComplexe: 1.0, heuresPrepa: 0, amort: 0, niveauDefaut: "complet" },
+      { id: "tr-sec-2000-nc", label: "Transfo sec ≤ 2000 kVA non capoté", heuresSimple: 2.73, heuresComplexe: 0.87, heuresPrepa: 0.1, amort: 58.5, niveauDefaut: "complet" },
+      { id: "tr-sec-plus2000-nc", label: "Transfo sec > 2000 kVA non capoté", heuresSimple: 3.64, heuresComplexe: 0.9, heuresPrepa: 0.1, amort: 73.78, niveauDefaut: "complet" },
+      { id: "tr-sec-2000-c", label: "Transfo sec ≤ 2000 kVA capoté", heuresSimple: 3.69, heuresComplexe: 1.31, heuresPrepa: 0.1, amort: 81.25, niveauDefaut: "complet" },
+      { id: "tr-sec-plus2000-c", label: "Transfo sec > 2000 kVA capoté", heuresSimple: 4.37, heuresComplexe: 1.83, heuresPrepa: 0.1, amort: 100.75, niveauDefaut: "complet" },
     ],
   },
   btSecondaire: {
     label: "Disjoncteurs BT — injection secondaire",
     marquesRef: "Schneider (Masterpact, Compact NS/NSX), Eaton/Moeller, ABB SACE, Siemens, Legrand, GE",
     items: [
-      { id: "bts-debro-630", label: "Disj débro ≤630A injection secondaire", heures: 1.2, amort: 25, niveau: "technicien" },
-      { id: "bts-debro-3200", label: "Disj débro ≤3200A injection secondaire", heures: 2.2, amort: 50, niveau: "technicien" },
-      { id: "bts-debro-4000", label: "Disj débro ≥4000A injection secondaire", heures: 3.0, amort: 70, niveau: "technicien" },
-      { id: "bts-fixe-630", label: "Disj fixe ≤630A injection secondaire", heures: 0.85, amort: 16.25, niveau: "technicien" },
-      { id: "bts-fixe-3200", label: "Disj fixe ≤3200A injection secondaire", heures: 1.6, amort: 35, niveau: "technicien" },
-      { id: "bts-fixe-4000", label: "Disj fixe ≥4000A injection secondaire", heures: 1.95, amort: 43.75, niveau: "technicien" },
-      { id: "bts-inter-debro-630", label: "Interrupteur débro ≤630A", heures: 0.71, amort: 0, niveau: "technicien" },
-      { id: "bts-inter-debro-plus630", label: "Interrupteur débro >630A", heures: 1.32, amort: 0, niveau: "technicien" },
-      { id: "bts-inter-fixe-630", label: "Interrupteur fixe ≤630A", heures: 0.36, amort: 0, niveau: "technicien" },
-      { id: "bts-inter-fixe-plus630", label: "Interrupteur fixe >630A", heures: 0.72, amort: 0, niveau: "technicien" },
-      { id: "bts-tiroir-inj", label: "Tiroir injection secondaire", heures: 1.6, amort: 35, niveau: "technicien" },
-      { id: "bts-tiroir-sans", label: "Tiroir sans injection", heures: 1.11, amort: 0, niveau: "technicien" },
+      { id: "bts-debro-630", label: "Disj débro ≤630A injection secondaire", heuresSimple: 0.61, heuresComplexe: 0.39, heuresPrepa: 0.2, amort: 25, niveauDefaut: "complet" },
+      { id: "bts-debro-3200", label: "Disj débro ≤3200A injection secondaire", heuresSimple: 1.22, heuresComplexe: 0.78, heuresPrepa: 0.2, amort: 50, niveauDefaut: "complet" },
+      { id: "bts-debro-4000", label: "Disj débro ≥4000A injection secondaire", heuresSimple: 2.02, heuresComplexe: 0.78, heuresPrepa: 0.2, amort: 70, niveauDefaut: "complet" },
+      { id: "bts-fixe-630", label: "Disj fixe ≤630A injection secondaire", heuresSimple: 0.26, heuresComplexe: 0.39, heuresPrepa: 0.2, amort: 16.25, niveauDefaut: "complet" },
+      { id: "bts-fixe-3200", label: "Disj fixe ≤3200A injection secondaire", heuresSimple: 0.62, heuresComplexe: 0.78, heuresPrepa: 0.2, amort: 35, niveauDefaut: "complet" },
+      { id: "bts-fixe-4000", label: "Disj fixe ≥4000A injection secondaire", heuresSimple: 0.97, heuresComplexe: 0.78, heuresPrepa: 0.2, amort: 43.75, niveauDefaut: "complet" },
+      { id: "bts-inter-debro-630", label: "Interrupteur débro ≤630A", heuresSimple: 0.61, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "bts-inter-debro-plus630", label: "Interrupteur débro >630A", heuresSimple: 1.22, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "bts-inter-fixe-630", label: "Interrupteur fixe ≤630A", heuresSimple: 0.26, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "bts-inter-fixe-plus630", label: "Interrupteur fixe >630A", heuresSimple: 0.62, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "bts-tiroir-inj", label: "Tiroir injection secondaire", heuresSimple: 1.01, heuresComplexe: 0.39, heuresPrepa: 0.2, amort: 35, niveauDefaut: "complet" },
+      { id: "bts-tiroir-sans", label: "Tiroir sans injection", heuresSimple: 1.01, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
     ],
   },
   btPrimaire: {
     label: "Disjoncteurs BT — injection primaire",
     marquesRef: "",
     items: [
-      { id: "btp-debro-630", label: "Disj débro ≤630A injection primaire", heures: 2.86, amort: 112.36, niveau: "technicien" },
-      { id: "btp-debro-3200", label: "Disj débro ≤3200A injection primaire", heures: 3.77, amort: 151.54, niveau: "technicien" },
-      { id: "btp-debro-4000", label: "Disj débro ≥4000A injection primaire", heures: 6.57, amort: 272.09, niveau: "technicien" },
-      { id: "btp-magneto-1250", label: "Disj magnéto-thermique ≤1250A primaire", heures: 6.5, amort: 258.31, niveau: "technicien" },
-      { id: "btp-magneto-plus1250", label: "Disj magnéto-thermique >1250A primaire", heures: 7.5, amort: 301.36, niveau: "technicien" },
+      { id: "btp-debro-630", label: "Disj débro ≤630A injection primaire", heuresSimple: 0.61, heuresComplexe: 2.0, heuresPrepa: 0.25, amort: 112.36, niveauDefaut: "complet" },
+      { id: "btp-debro-3200", label: "Disj débro ≤3200A injection primaire", heuresSimple: 1.22, heuresComplexe: 2.3, heuresPrepa: 0.25, amort: 151.54, niveauDefaut: "complet" },
+      { id: "btp-debro-4000", label: "Disj débro ≥4000A injection primaire", heuresSimple: 2.02, heuresComplexe: 4.3, heuresPrepa: 0.25, amort: 272.09, niveauDefaut: "complet" },
+      { id: "btp-magneto-1250", label: "Disj magnéto-thermique ≤1250A primaire", heuresSimple: 2.5, heuresComplexe: 3.5, heuresPrepa: 0.5, amort: 258.31, niveauDefaut: "complet" },
+      { id: "btp-magneto-plus1250", label: "Disj magnéto-thermique >1250A primaire", heuresSimple: 3.0, heuresComplexe: 4.0, heuresPrepa: 0.5, amort: 301.36, niveauDefaut: "complet" },
     ],
   },
   pfcRec: {
     label: "Divers — compensateurs et redresseurs",
     marquesRef: "",
     items: [
-      { id: "pfc-bt-5", label: "PFC BT : 400V ≤ 5 gradins", heures: 2.8, amort: 0, niveau: "technicien" },
-      { id: "pfc-bt-plus5", label: "PFC BT : 400V > 5 gradins", heures: 4.0, amort: 0, niveau: "technicien" },
-      { id: "pfc-hta", label: "PFC HTA : 20kV ≤1500kvar / 5.5kV ≤150kvar", heures: 8.0, amort: 0, niveau: "technicien" },
-      { id: "rec-c13", label: "REC type C13-100", heures: 1.56, amort: 0, niveau: "technicien" },
-      { id: "rec-sces", label: "REC type SCES", heures: 2.8, amort: 0, niveau: "technicien" },
+      { id: "pfc-bt-5", label: "PFC BT : 400V ≤ 5 gradins", heuresSimple: 0, heuresComplexe: 0, heuresPrepa: 2.8, amort: 0, niveauDefaut: "complet" },
+      { id: "pfc-bt-plus5", label: "PFC BT : 400V > 5 gradins", heuresSimple: 0, heuresComplexe: 0, heuresPrepa: 4.0, amort: 0, niveauDefaut: "complet" },
+      { id: "pfc-hta", label: "PFC HTA : 20kV ≤1500kvar / 5.5kV ≤150kvar", heuresSimple: 4.0, heuresComplexe: 4.0, heuresPrepa: 0, amort: 0, niveauDefaut: "complet" },
+      { id: "rec-c13", label: "REC type C13-100", heuresSimple: 0, heuresComplexe: 1.56, heuresPrepa: 0, amort: 0, niveauDefaut: "complet" },
+      { id: "rec-sces", label: "REC type SCES", heuresSimple: 0, heuresComplexe: 2.8, heuresPrepa: 0, amort: 0, niveauDefaut: "complet" },
     ],
   },
 };
@@ -204,6 +206,20 @@ const LABEL_FAMILLE = {
   manuel: "Poste libre",
 };
 
+// Niveau de prestation réalisée sur l'équipement (pas le technicien) :
+// simple (1-2), complexe (3-4), ou complet (1-4 = simple + complexe).
+// La préparation est comptée dans tous les niveaux.
+const NIVEAUX_PRESTATION = {
+  simple: "Niveau 1-2 (simple)",
+  complexe: "Niveau 3-4 (complexe)",
+  complet: "Niveau 1-4 (complet)",
+};
+function heuresPourNiveau(item, niveau) {
+  if (niveau === "simple") return item.heuresSimple + item.heuresPrepa;
+  if (niveau === "complexe") return item.heuresComplexe + item.heuresPrepa;
+  return item.heuresSimple + item.heuresComplexe + item.heuresPrepa; // complet
+}
+
 function euros(n) {
   if (!isFinite(n)) return "0 €";
   return n.toLocaleString("fr-FR", { maximumFractionDigits: 0 }) + " €";
@@ -214,7 +230,7 @@ function findCoefCategory(catalogue, valeur) {
 }
 
 function nouveauPosteEquipement(n) {
-  return { id: uid(), nom: `Poste ${n}`, niveauTechnicien: "technicien", typeJournee: "semaine", quantites: {} };
+  return { id: uid(), nom: `Poste ${n}`, niveauTechnicien: "expert", typeJournee: "semaine", quantites: {}, niveaux: {} };
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +333,7 @@ function Select({ value, onChange, options, style }) {
 // les postes) — défini en dehors du composant principal pour ne pas être
 // recréé à chaque rendu (sinon React démonte/remonte tout le tableau à
 // chaque frappe, ce qui fait perdre le focus et remonter la page).
-function TableauCatalogue({ poste, catalogueTemps, catalogueDirect, setQtePoste }) {
+function TableauCatalogue({ poste, catalogueTemps, catalogueDirect, setQtePoste, setNiveauPoste }) {
   return (
     <div className="flex flex-col gap-6">
       {Object.entries(catalogueTemps).map(([famId, cat]) => (
@@ -328,10 +344,21 @@ function TableauCatalogue({ poste, catalogueTemps, catalogueDirect, setQtePoste 
               <tbody>
                 {cat.items.map((item) => {
                   const qte = poste.quantites[item.id] || 0;
+                  const niveau = (poste.niveaux && poste.niveaux[item.id]) || item.niveauDefaut || "complet";
                   return (
                     <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
                       <td className="py-2 pr-3" style={{ color: INK }}>
                         {item.label}
+                      </td>
+                      <td className="py-2 pr-3 text-right" style={{ width: 170 }}>
+                        {qte > 0 && (
+                          <Select
+                            value={niveau}
+                            onChange={(v) => setNiveauPoste(poste.id, item.id, v)}
+                            options={Object.entries(NIVEAUX_PRESTATION).map(([k, label]) => ({ value: k, label }))}
+                            style={{ fontSize: 12, padding: "4px 6px" }}
+                          />
+                        )}
                       </td>
                       <td className="py-2 text-right" style={{ width: 90 }}>
                         <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix="u" width={64} />
@@ -426,12 +453,14 @@ export default function ChiffrageHTMaintenance() {
     setPostesEquipement((ps) => {
       const src = ps.find((p) => p.id === id);
       if (!src) return ps;
-      return [...ps, { ...src, id: uid(), nom: `${src.nom} (copie)`, quantites: { ...src.quantites } }];
+      return [...ps, { ...src, id: uid(), nom: `${src.nom} (copie)`, quantites: { ...src.quantites }, niveaux: { ...(src.niveaux || {}) } }];
     });
   const updatePosteEquipement = (id, patch) => setPostesEquipement((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   const removePosteEquipement = (id) => setPostesEquipement((ps) => (ps.length > 1 ? ps.filter((p) => p.id !== id) : ps));
   const setQtePoste = (posteId, itemId, v) =>
     setPostesEquipement((ps) => ps.map((p) => (p.id === posteId ? { ...p, quantites: { ...p.quantites, [itemId]: Math.max(0, v) } } : p)));
+  const setNiveauPoste = (posteId, itemId, niveau) =>
+    setPostesEquipement((ps) => ps.map((p) => (p.id === posteId ? { ...p, niveaux: { ...(p.niveaux || {}), [itemId]: niveau } } : p)));
 
   const [syncState, setSyncState] = useState("idle"); // idle | loading | syncing | synced | error
   const [authReady, setAuthReady] = useState(false);
@@ -667,12 +696,12 @@ export default function ChiffrageHTMaintenance() {
         id: uid(),
         famille: "batteries",
         quantite: 1,
-        niveauTechnicien: "technicien",
+        niveauTechnicien: "expert",
         typeJournee: "semaine",
         prixAchatUnitaire: 20,
         libelleManuel: "",
         joursManuel: 1,
-        prixJour: tarifs.technicien.jour,
+        prixJour: tarifs.expert.jour,
       })),
     ]);
   const updateLigneLibre = (id, patch) => setLignesLibres((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
@@ -706,9 +735,11 @@ export default function ChiffrageHTMaintenance() {
         cat.items.forEach((item) => {
           const qte = poste.quantites[item.id] || 0;
           if (qte > 0) {
-            const tarif = tarifs[item.niveau] || tarifs.technicien;
-            const joursHomme = (item.heures / heuresJour) * qte;
-            const montantUnitaire = (item.heures / heuresJour) * tarif.jour * majoration.coef + item.amort;
+            const tarif = tarifs.expert;
+            const niveau = (poste.niveaux && poste.niveaux[item.id]) || item.niveauDefaut || "complet";
+            const heures = heuresPourNiveau(item, niveau);
+            const joursHomme = (heures / heuresJour) * qte;
+            const montantUnitaire = (heures / heuresJour) * tarif.jour * majoration.coef + item.amort;
             out.push({ id: `${poste.id}-${item.id}`, posteId: poste.id, posteNom: poste.nom, famille: famId, label: item.label, qte, joursHomme, montant: montantUnitaire * qte });
           }
         });
@@ -1039,7 +1070,7 @@ export default function ChiffrageHTMaintenance() {
                     />
                   </div>
                 </div>
-                <TableauCatalogue poste={poste} catalogueTemps={catalogueTemps} catalogueDirect={catalogueDirect} setQtePoste={setQtePoste} />
+                <TableauCatalogue poste={poste} catalogueTemps={catalogueTemps} catalogueDirect={catalogueDirect} setQtePoste={setQtePoste} setNiveauPoste={setNiveauPoste} />
               </SectionCard>
             ))}
 
@@ -1343,7 +1374,7 @@ export default function ChiffrageHTMaintenance() {
                 <label style={{ fontSize: 12, color: MUTED }}>Heures travaillées par jour</label>
                 <NumberField value={heuresJour} onChange={setHeuresJour} suffix="h" />
                 <span style={{ fontSize: 11.5, color: MUTED }}>
-                  (avec les valeurs par défaut : {euros(tarifs.technicien.jour / heuresJour)}/h — cohérent avec le fichier source)
+                  (avec les valeurs par défaut : {euros(tarifs.expert.jour / heuresJour)}/h — cohérent avec le fichier source)
                 </span>
               </div>
             </SectionCard>
@@ -1382,8 +1413,8 @@ export default function ChiffrageHTMaintenance() {
             </SectionCard>
 
             <SectionCard
-              title="Catalogue équipements — heures, amortissement et niveau"
-              subtitle="Prix de revient = (heures ÷ heures/jour) × tarif du niveau choisi (semaine) + amortissement — le niveau détermine le tarif appliqué dans le chiffrage"
+              title="Catalogue équipements — temps par niveau de prestation"
+              subtitle="Niveau 1-2 = temps simple + préparation, Niveau 3-4 = temps complexe + préparation, Niveau 1-4 = tout. Prix de revient = (heures du niveau ÷ heures/jour) × tarif jour + amortissement"
               icon={ClipboardList}
             >
               <div className="flex flex-col gap-5">
@@ -1392,39 +1423,32 @@ export default function ChiffrageHTMaintenance() {
                     <div style={{ fontWeight: 600, color: INK, fontSize: 13 }}>{cat.label}</div>
                     {cat.marquesRef && <div style={{ fontSize: 11.5, color: MUTED, marginBottom: 8 }}>{cat.marquesRef}</div>}
                     <div className="flex flex-col gap-1.5 mt-2">
-                      <div className="grid grid-cols-6 gap-3" style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>
+                      <div className="grid grid-cols-8 gap-2" style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>
                         <span style={{ gridColumn: "span 2" }}></span>
-                        <span>Heures</span>
+                        <span>Simple (1-2)</span>
+                        <span>Complexe (3-4)</span>
+                        <span>Prépa.</span>
                         <span>Amort.</span>
-                        <span>Niveau</span>
-                        <span>Prix de revient</span>
+                        <span>Niveau défaut</span>
+                        <span>Prix (défaut)</span>
                       </div>
                       {cat.items.map((item, i) => {
-                        const tarifItem = tarifs[item.niveau] || tarifs.technicien;
-                        const prixRevient = (item.heures / heuresJour) * tarifItem.jour + item.amort;
+                        const heuresDefaut = heuresPourNiveau(item, item.niveauDefaut || "complet");
+                        const prixRevient = (heuresDefaut / heuresJour) * tarifs.expert.jour + item.amort;
+                        const majItem = (patch) =>
+                          setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, ...patch } : it)) } }));
                         return (
-                          <div key={item.id} className="grid grid-cols-6 gap-3 items-center">
+                          <div key={item.id} className="grid grid-cols-8 gap-2 items-center">
                             <span style={{ fontSize: 13, color: INK, gridColumn: "span 2" }}>{item.label}</span>
-                            <NumberField
-                              value={item.heures}
-                              onChange={(v) =>
-                                setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, heures: v } : it)) } }))
-                              }
-                              suffix="h/u"
-                            />
-                            <NumberField
-                              value={item.amort}
-                              onChange={(v) =>
-                                setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, amort: v } : it)) } }))
-                              }
-                              suffix="€ amort."
-                            />
+                            <NumberField value={item.heuresSimple} onChange={(v) => majItem({ heuresSimple: v })} suffix="h" width={62} />
+                            <NumberField value={item.heuresComplexe} onChange={(v) => majItem({ heuresComplexe: v })} suffix="h" width={62} />
+                            <NumberField value={item.heuresPrepa} onChange={(v) => majItem({ heuresPrepa: v })} suffix="h" width={62} />
+                            <NumberField value={item.amort} onChange={(v) => majItem({ amort: v })} suffix="€" width={62} />
                             <Select
-                              value={item.niveau || "technicien"}
-                              onChange={(v) =>
-                                setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, niveau: v } : it)) } }))
-                              }
-                              options={Object.entries(tarifs).map(([k, v]) => ({ value: k, label: v.label }))}
+                              value={item.niveauDefaut || "complet"}
+                              onChange={(v) => majItem({ niveauDefaut: v })}
+                              options={Object.entries(NIVEAUX_PRESTATION).map(([k, label]) => ({ value: k, label }))}
+                              style={{ fontSize: 12, padding: "4px 6px" }}
                             />
                             <span style={{ fontSize: 13, fontWeight: 600, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(prixRevient)}</span>
                           </div>
