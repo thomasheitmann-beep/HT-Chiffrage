@@ -135,17 +135,6 @@ const DEFAULT_CATALOGUE_TEMPS = {
 };
 
 const DEFAULT_CATALOGUE_COEF = {
-  batteries: {
-    label: "Batteries",
-    unite: "par batterie",
-    categories: [
-      { id: "bat-a", label: "7 à 12 Ah", min: 7, max: 12, coef: 2.1 },
-      { id: "bat-b", label: "13 à 60 Ah", min: 13, max: 60, coef: 2.0 },
-      { id: "bat-c", label: "61 à 125 Ah", min: 61, max: 125, coef: 1.7 },
-      { id: "bat-d", label: "> 130 Ah", min: 130, max: Infinity, coef: 1.5 },
-    ],
-    critereLabel: "Capacité (Ah)",
-  },
   composants: {
     label: "Composants",
     unite: "par composant",
@@ -184,11 +173,39 @@ const DEFAULT_CATALOGUE_DIRECT = {
       { id: "tgbt-seul", label: "Nettoyage seul (mètres)", prix: 600 },
     ],
   },
+  batteries: {
+    label: "Batteries",
+    unite: "u",
+    // Prix d'achat = tarif fournisseur indicatif (RS Components, Yuasa...) pour
+    // une batterie plomb étanche 12V standard. Coefficient repris des paliers
+    // d'origine (7-12 Ah ×2,1 / 13-60 Ah ×2,0 / 61-125 Ah ×1,7 / >130 Ah ×1,5).
+    // Prix de vente = prix d'achat × coefficient — modifiable à tout niveau.
+    items: [
+      { id: "bat-7", label: "7 Ah", prixAchat: 30, coef: 2.1, prix: 63 },
+      { id: "bat-12", label: "12 Ah", prixAchat: 45, coef: 2.1, prix: 94.5 },
+      { id: "bat-17", label: "17 Ah", prixAchat: 60, coef: 2.0, prix: 120 },
+      { id: "bat-24", label: "24 Ah", prixAchat: 85, coef: 2.0, prix: 170 },
+      { id: "bat-33", label: "33 Ah", prixAchat: 150, coef: 2.0, prix: 300 },
+      { id: "bat-38", label: "38 Ah", prixAchat: 190, coef: 2.0, prix: 380 },
+      { id: "bat-55", label: "55 Ah", prixAchat: 230, coef: 2.0, prix: 460 },
+      { id: "bat-65", label: "65 Ah", prixAchat: 280, coef: 1.7, prix: 476 },
+      { id: "bat-100", label: "100 Ah", prixAchat: 420, coef: 1.7, prix: 714 },
+      { id: "bat-150", label: "150 Ah", prixAchat: 650, coef: 1.5, prix: 975 },
+      { id: "bat-200", label: "200 Ah", prixAchat: 850, coef: 1.5, prix: 1275 },
+    ],
+  },
+  onduleur: {
+    label: "Onduleurs",
+    unite: "u",
+    items: [
+      { id: "ond-simplifie", label: "Onduleur simplifié", prix: 300 },
+      { id: "ond-complet", label: "Onduleur", prix: 600 },
+    ],
+  },
 };
 
 // Familles pour les "lignes libres" (batteries, composants, poste manuel)
 const FAMILLES_LIBRES = [
-  { id: "batteries", label: "Batteries", type: "coef" },
   { id: "composants", label: "Composants", type: "coef" },
   { id: "manuel", label: "Poste libre (manuel)", type: "manuel" },
 ];
@@ -203,6 +220,7 @@ const LABEL_FAMILLE = {
   tgbt: "TGBT — nettoyage",
   batteries: "Batteries",
   composants: "Composants",
+  onduleur: "Onduleurs",
   manuel: "Poste libre",
 };
 
@@ -422,6 +440,13 @@ export default function ChiffrageHTMaintenance() {
   // multi-niveaux, ancien champ "heures" unique par équipement).
   const tarifsValides = (t) => !!(t && t.expert && Object.keys(t).length === 1);
   const catalogueTempsValide = (c) => !!(c && c.hta && c.hta.items && c.hta.items[0] && c.hta.items[0].heuresSimple != null);
+  const migrerCatalogueDirect = (savedDirect) => {
+    const base = { ...DEFAULT_CATALOGUE_DIRECT, ...(savedDirect || {}) };
+    if (!base.batteries || !base.batteries.items || base.batteries.items[0]?.prixAchat == null) {
+      base.batteries = DEFAULT_CATALOGUE_DIRECT.batteries;
+    }
+    return base;
+  };
 
   const [tarifs, setTarifs] = useState(tarifsValides(saved.tarifs) ? saved.tarifs : DEFAULT_TARIFS);
   const [majorations, setMajorations] = useState(saved.majorations || DEFAULT_MAJORATIONS);
@@ -430,8 +455,21 @@ export default function ChiffrageHTMaintenance() {
   const [heuresJour, setHeuresJour] = useState(saved.heuresJour ?? 7);
 
   const [catalogueTemps, setCatalogueTemps] = useState(catalogueTempsValide(saved.catalogueTemps) ? saved.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
-  const [catalogueCoef, setCatalogueCoef] = useState(saved.catalogueCoef || DEFAULT_CATALOGUE_COEF);
-  const [catalogueDirect, setCatalogueDirect] = useState(saved.catalogueDirect || DEFAULT_CATALOGUE_DIRECT);
+  const [catalogueCoef, setCatalogueCoef] = useState({ ...DEFAULT_CATALOGUE_COEF, ...(saved.catalogueCoef || {}) });
+  const [catalogueDirect, setCatalogueDirect] = useState(migrerCatalogueDirect(saved.catalogueDirect));
+
+  const ajouterLigneCatalogueDirect = (familleKey) =>
+    setCatalogueDirect((s) => {
+      const nouvelItem =
+        familleKey === "batteries"
+          ? { id: uid(), label: "Nouvelle capacité", prixAchat: 0, coef: 2, prix: 0 }
+          : { id: uid(), label: "Nouvel article", prix: 0 };
+      return { ...s, [familleKey]: { ...s[familleKey], items: [...s[familleKey].items, nouvelItem] } };
+    });
+  const supprimerLigneCatalogueDirect = (familleKey, itemId) =>
+    setCatalogueDirect((s) => ({ ...s, [familleKey]: { ...s[familleKey], items: s[familleKey].items.filter((it) => it.id !== itemId) } }));
+  const renommerLigneCatalogueDirect = (familleKey, itemId, label) =>
+    setCatalogueDirect((s) => ({ ...s, [familleKey]: { ...s[familleKey], items: s[familleKey].items.map((it) => (it.id === itemId ? { ...it, label } : it)) } }));
 
   // Contenu vierge d'un chiffrage — les tarifs/catalogues (ci-dessus) restent
   // partagés entre tous les chiffrages, seuls affaire/postes/lignes sont propres
@@ -540,8 +578,8 @@ export default function ChiffrageHTMaintenance() {
           if (data.coefContrat) setCoefContrat(data.coefContrat);
           if (data.heuresJour != null) setHeuresJour(data.heuresJour);
           setCatalogueTemps(catalogueTempsValide(data.catalogueTemps) ? data.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
-          if (data.catalogueCoef) setCatalogueCoef(data.catalogueCoef);
-          if (data.catalogueDirect) setCatalogueDirect(data.catalogueDirect);
+          setCatalogueCoef({ ...DEFAULT_CATALOGUE_COEF, ...(data.catalogueCoef || {}) });
+          setCatalogueDirect(migrerCatalogueDirect(data.catalogueDirect));
         }
         setSyncState("synced");
       })
@@ -722,8 +760,8 @@ export default function ChiffrageHTMaintenance() {
           if (data.coefContrat) setCoefContrat(data.coefContrat);
           if (data.heuresJour != null) setHeuresJour(data.heuresJour);
           setCatalogueTemps(catalogueTempsValide(data.catalogueTemps) ? data.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
-          if (data.catalogueCoef) setCatalogueCoef(data.catalogueCoef);
-          if (data.catalogueDirect) setCatalogueDirect(data.catalogueDirect);
+          setCatalogueCoef({ ...DEFAULT_CATALOGUE_COEF, ...(data.catalogueCoef || {}) });
+          setCatalogueDirect(migrerCatalogueDirect(data.catalogueDirect));
         }
         setSyncState("synced");
       })
@@ -759,11 +797,12 @@ export default function ChiffrageHTMaintenance() {
       ...ls,
       ...Array.from({ length: Math.max(1, Math.round(n)) }, () => ({
         id: uid(),
-        famille: "batteries",
+        famille: "composants",
         quantite: 1,
         niveauTechnicien: "expert",
         typeJournee: "semaine",
         prixAchatUnitaire: 20,
+        categorieId: "",
         libelleManuel: "",
         joursManuel: 1,
         prixJour: tarifs.expert.jour,
@@ -780,7 +819,9 @@ export default function ChiffrageHTMaintenance() {
     let detail = "";
     if (famille.type === "coef") {
       const cat = catalogueCoef[l.famille];
-      const categorie = findCoefCategory(cat, l.prixAchatUnitaire);
+      const categorie = cat.manuelCategorie
+        ? cat.categories.find((c) => c.id === l.categorieId) || cat.categories[0]
+        : findCoefCategory(cat, l.prixAchatUnitaire);
       montant = l.prixAchatUnitaire * categorie.coef * l.quantite;
       detail = `${euros(l.prixAchatUnitaire)} × coef ${categorie.coef} (${categorie.label}) × ${l.quantite}`;
     } else {
@@ -805,7 +846,7 @@ export default function ChiffrageHTMaintenance() {
             const heures = heuresPourNiveau(item, niveau);
             const joursHomme = (heures / heuresJour) * qte;
             const montantUnitaire = (heures / heuresJour) * tarif.jour * majoration.coef + item.amort;
-            out.push({ id: `${poste.id}-${item.id}`, posteId: poste.id, posteNom: poste.nom, famille: famId, label: item.label, qte, joursHomme, montant: montantUnitaire * qte });
+            out.push({ id: `${poste.id}-${item.id}`, posteId: poste.id, posteNom: poste.nom, famille: famId, label: item.label, qte, joursHomme, niveau, montant: montantUnitaire * qte });
           }
         });
       });
@@ -835,6 +876,14 @@ export default function ChiffrageHTMaintenance() {
 
   const totalJoursHomme =
     lignesCatalogue.reduce((s, l) => s + l.joursHomme, 0) + lignesLibresCalc.reduce((s, l) => s + l.joursHomme, 0);
+
+  // Jours-hommes des équipements du catalogue, répartis par niveau de
+  // prestation (les lignes libres n'ont pas de niveau, comptées à part).
+  const joursHommeParNiveau = { simple: 0, complexe: 0, complet: 0 };
+  lignesCatalogue.forEach((l) => {
+    if (l.niveau) joursHommeParNiveau[l.niveau] = (joursHommeParNiveau[l.niveau] || 0) + l.joursHomme;
+  });
+  const joursHommeLignesLibres = lignesLibresCalc.reduce((s, l) => s + l.joursHomme, 0);
 
   const totalAvantCoef =
     lignesCatalogue.reduce((s, l) => s + l.montant, 0) + lignesLibresCalc.reduce((s, l) => s + l.montant, 0);
@@ -1235,9 +1284,20 @@ export default function ChiffrageHTMaintenance() {
                         </div>
 
                         {famille.type === "coef" && (
-                          <div className="md:col-span-3">
+                          <div className="md:col-span-2">
                             <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>{catalogueCoef[l.famille].critereLabel}</label>
                             <NumberField value={l.prixAchatUnitaire} onChange={(v) => updateLigneLibre(l.id, { prixAchatUnitaire: v })} width="100%" />
+                          </div>
+                        )}
+
+                        {famille.type === "coef" && catalogueCoef[l.famille].manuelCategorie && (
+                          <div className="md:col-span-1">
+                            <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Catégorie</label>
+                            <Select
+                              value={l.categorieId || catalogueCoef[l.famille].categories[0].id}
+                              onChange={(v) => updateLigneLibre(l.id, { categorieId: v })}
+                              options={catalogueCoef[l.famille].categories.map((c) => ({ value: c.id, label: c.label }))}
+                            />
                           </div>
                         )}
 
@@ -1461,6 +1521,22 @@ export default function ChiffrageHTMaintenance() {
                     <td className="py-2 text-right" style={{ fontWeight: 500, color: INK, fontVariantNumeric: "tabular-nums" }}>{totalEquipements}</td>
                   </tr>
                   <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2 pl-3" style={{ color: MUTED, fontSize: 12.5 }}>— Niveau 1-2 (simple)</td>
+                    <td className="py-2 text-right" style={{ color: MUTED, fontSize: 12.5, fontVariantNumeric: "tabular-nums" }}>{joursHommeParNiveau.simple.toFixed(2)} j</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2 pl-3" style={{ color: MUTED, fontSize: 12.5 }}>— Niveau 3-4 (complexe)</td>
+                    <td className="py-2 text-right" style={{ color: MUTED, fontSize: 12.5, fontVariantNumeric: "tabular-nums" }}>{joursHommeParNiveau.complexe.toFixed(2)} j</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2 pl-3" style={{ color: MUTED, fontSize: 12.5 }}>— Niveau 1-4 (complet)</td>
+                    <td className="py-2 text-right" style={{ color: MUTED, fontSize: 12.5, fontVariantNumeric: "tabular-nums" }}>{joursHommeParNiveau.complet.toFixed(2)} j</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2 pl-3" style={{ color: MUTED, fontSize: 12.5 }}>— Lignes libres</td>
+                    <td className="py-2 text-right" style={{ color: MUTED, fontSize: 12.5, fontVariantNumeric: "tabular-nums" }}>{joursHommeLignesLibres.toFixed(2)} j</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
                     <td className="py-2" style={{ color: MUTED }}>Total jours-hommes</td>
                     <td className="py-2 text-right" style={{ fontWeight: 500, color: INK, fontVariantNumeric: "tabular-nums" }}>{totalJoursHomme.toFixed(2)} j</td>
                   </tr>
@@ -1621,7 +1697,7 @@ export default function ChiffrageHTMaintenance() {
               </div>
             </SectionCard>
 
-            <SectionCard title="Catalogue — batteries & composants (coefficient sur prix d'achat)" icon={ClipboardList}>
+            <SectionCard title="Catalogue — composants (coefficient sur prix d'achat)" icon={ClipboardList}>
               <div className="flex flex-col gap-5">
                 {Object.entries(catalogueCoef).map(([key, cat]) => (
                   <div key={key}>
@@ -1643,23 +1719,63 @@ export default function ChiffrageHTMaintenance() {
               </div>
             </SectionCard>
 
-            <SectionCard title="Analyses d'huile & TGBT (prix directs)" icon={ClipboardList}>
+            <SectionCard title="Analyses d'huile, TGBT, Batteries & Onduleurs (prix directs)" icon={ClipboardList}>
               <div className="flex flex-col gap-5">
                 {Object.entries(catalogueDirect).map(([key, cat]) => (
                   <div key={key}>
-                    <div style={{ fontWeight: 600, color: INK, fontSize: 13, marginBottom: 8 }}>{cat.label}</div>
-                    <div className="flex flex-col gap-1.5">
-                      {cat.items.map((item, i) => (
-                        <div key={item.id} className="grid grid-cols-3 gap-3 items-center">
-                          <span style={{ fontSize: 13, color: INK, gridColumn: "span 2" }}>{item.label}</span>
-                          <NumberField
-                            value={item.prix}
-                            onChange={(v) => setCatalogueDirect((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, prix: v } : it)) } }))}
-                            suffix="€"
-                          />
-                        </div>
-                      ))}
+                    <div className="flex items-center justify-between mb-2">
+                      <div style={{ fontWeight: 600, color: INK, fontSize: 13 }}>{cat.label}</div>
+                      <button onClick={() => ajouterLigneCatalogueDirect(key)} className="flex items-center gap-1 text-xs font-medium" style={{ color: INK_2 }}>
+                        <Plus size={13} /> Ajouter une ligne
+                      </button>
                     </div>
+                    {key === "batteries" ? (
+                      <div className="flex flex-col gap-1.5">
+                        <div className="grid grid-cols-6 gap-2" style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>
+                          <span></span>
+                          <span>Prix d'achat</span>
+                          <span>Coefficient</span>
+                          <span colSpan={2}>Prix de vente</span>
+                          <span></span>
+                        </div>
+                        {cat.items.map((item, i) => {
+                          const majBatterie = (patch) => {
+                            const next = { ...item, ...patch };
+                            next.prix = next.prixAchat * next.coef;
+                            setCatalogueDirect((s) => ({ ...s, batteries: { ...s.batteries, items: s.batteries.items.map((it, j) => (j === i ? next : it)) } }));
+                          };
+                          return (
+                            <div key={item.id} className="grid grid-cols-6 gap-2 items-center">
+                              <TextField value={item.label} onChange={(v) => renommerLigneCatalogueDirect(key, item.id, v)} />
+                              <NumberField value={item.prixAchat} onChange={(v) => majBatterie({ prixAchat: v })} suffix="€" width="100%" />
+                              <NumberField value={item.coef} onChange={(v) => majBatterie({ coef: v })} suffix="×" width="100%" />
+                              <span style={{ fontSize: 13, fontWeight: 600, color: INK, fontVariantNumeric: "tabular-nums", gridColumn: "span 2" }}>{euros(item.prix)}</span>
+                              <button onClick={() => supprimerLigneCatalogueDirect(key, item.id)} style={{ color: "#B0473E" }} className="flex justify-end">
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-1.5">
+                        {cat.items.map((item, i) => (
+                          <div key={item.id} className="grid grid-cols-4 gap-3 items-center">
+                            <div style={{ gridColumn: "span 2" }}>
+                              <TextField value={item.label} onChange={(v) => renommerLigneCatalogueDirect(key, item.id, v)} />
+                            </div>
+                            <NumberField
+                              value={item.prix}
+                              onChange={(v) => setCatalogueDirect((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, prix: v } : it)) } }))}
+                              suffix="€"
+                            />
+                            <button onClick={() => supprimerLigneCatalogueDirect(key, item.id)} style={{ color: "#B0473E" }} className="flex justify-end">
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
