@@ -473,6 +473,7 @@ export default function ChiffrageHTMaintenance() {
   const [authReady, setAuthReady] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false); // évite un flash de l'écran de connexion pendant la toute première vérification
+  const [authTimedOut, setAuthTimedOut] = useState(false);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
@@ -501,7 +502,11 @@ export default function ChiffrageHTMaintenance() {
       setAuthReady(!!user);
       setAuthChecked(true);
     });
-    return unsubscribe;
+    const timeout = setTimeout(() => setAuthTimedOut(true), 6000);
+    return () => {
+      unsubscribe();
+      clearTimeout(timeout);
+    };
   }, []);
 
   const seConnecter = async (e) => {
@@ -995,6 +1000,14 @@ export default function ChiffrageHTMaintenance() {
     return (
       <div style={{ background: PAPER, minHeight: "100%", fontFamily: "Inter, system-ui, sans-serif", colorScheme: "light" }} className="w-full flex items-center justify-center" >
         <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10, minWidth: 320, maxWidth: 380 }} className="p-6 mx-4">
+          {!authChecked && authTimedOut && (
+            <div style={{ fontSize: 13, color: INK }} className="text-center">
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>La vérification de connexion ne répond pas.</div>
+              <div style={{ color: MUTED, fontSize: 12.5 }}>
+                Ça peut venir d'un bloqueur de contenu, d'une version de navigateur ancienne, ou d'un souci réseau. Essayez de recharger la page, ou un autre navigateur.
+              </div>
+            </div>
+          )}
           {authChecked && (
             <>
               <div className="flex items-center gap-3 mb-5">

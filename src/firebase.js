@@ -3,7 +3,7 @@
 
 import { initializeApp } from "firebase/app";
 import { initializeFirestore } from "firebase/firestore";
-import { getAuth } from "firebase/auth";
+import { getAuth, setPersistence, browserLocalPersistence, inMemoryPersistence } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDDA5cCPZO2Wjfx-8YP4WFJQIUVIc-Qqb0",
@@ -24,7 +24,13 @@ export const db = initializeFirestore(app, {
   useFetchStreams: false,
 });
 
-// Les règles Firestore de ce projet exigent un utilisateur authentifié
-// (request.auth != null) — on utilise une connexion anonyme automatique,
-// sans écran de connexion ni mot de passe pour l'utilisateur.
+// Firebase Authentication utilise IndexedDB par défaut pour retenir la
+// connexion — mal supporté sur les anciennes versions de Safari/macOS, ce
+// qui peut faire "bloquer" silencieusement la vérification de connexion
+// (écran vide, aucune erreur). On force explicitement localStorage, plus
+// simple et plus largement compatible ; en dernier recours, en mémoire
+// (fonctionne quand même, juste sans rester connecté après fermeture).
 export const auth = getAuth(app);
+setPersistence(auth, browserLocalPersistence).catch(() => {
+  setPersistence(auth, inMemoryPersistence).catch(() => {});
+});
