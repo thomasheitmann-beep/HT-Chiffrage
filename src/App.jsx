@@ -702,8 +702,31 @@ export default function ChiffrageHTMaintenance() {
       .catch(() => setSyncState("error"));
   };
 
+  // Annule les modifications non enregistrées : recharge les dernières
+  // valeurs réellement enregistrées dans le cloud (pas les valeurs d'usine).
+  const annulerModifications = () => {
+    if (!window.confirm("Annuler vos modifications non enregistrées et recharger les dernières valeurs enregistrées ?")) return;
+    setSyncState("loading");
+    getDoc(doc(db, FIRESTORE_DOC))
+      .then((snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          setTarifs(tarifsValides(data.tarifs) ? data.tarifs : DEFAULT_TARIFS);
+          if (data.majorations) setMajorations(data.majorations);
+          if (data.degressivite) setDegressivite(data.degressivite);
+          if (data.coefContrat) setCoefContrat(data.coefContrat);
+          if (data.heuresJour != null) setHeuresJour(data.heuresJour);
+          setCatalogueTemps(catalogueTempsValide(data.catalogueTemps) ? data.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
+          if (data.catalogueCoef) setCatalogueCoef(data.catalogueCoef);
+          if (data.catalogueDirect) setCatalogueDirect(data.catalogueDirect);
+        }
+        setSyncState("synced");
+      })
+      .catch(() => setSyncState("error"));
+  };
+
   const reinitialiserParametres = () => {
-    if (!window.confirm("Réinitialiser tous les paramètres et catalogues aux valeurs par défaut ?")) return;
+    if (!window.confirm("Réinitialiser tous les paramètres et catalogues aux valeurs D'USINE (ça remplacera aussi la dernière version enregistrée) ?")) return;
     setTarifs(DEFAULT_TARIFS);
     setMajorations(DEFAULT_MAJORATIONS);
     setDegressivite(DEFAULT_DEGRESSIVITE);
@@ -1458,12 +1481,15 @@ export default function ChiffrageHTMaintenance() {
           <>
             <div className="flex items-center justify-between flex-wrap gap-2">
               <span style={{ fontSize: 12, color: MUTED }}>Vos modifications sont enregistrées automatiquement dans ce navigateur.</span>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <button onClick={enregistrerParametresMaintenant} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
                   Enregistrer les valeurs
                 </button>
+                <button onClick={annulerModifications} className="text-sm underline" style={{ color: INK_2 }}>
+                  Annuler mes modifications
+                </button>
                 <button onClick={reinitialiserParametres} className="text-sm underline" style={{ color: "#B0473E" }}>
-                  Réinitialiser les valeurs par défaut
+                  Réinitialiser aux valeurs d'usine
                 </button>
               </div>
             </div>
