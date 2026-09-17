@@ -1,4282 +1,1633 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import * as XLSX from "xlsx";
-import {
-  LayoutDashboard, FileText, Receipt, Users, Package, Settings as SettingsIcon,
-  Plus, Trash2, Pencil, Copy, ArrowRightLeft, Printer, X, Check, AlertTriangle,
-  ChevronLeft, Search, Zap, CircleDollarSign, Clock, TrendingUp, Upload, Truck, ShoppingCart, FolderOpen, ScrollText, Download, DatabaseBackup
-} from "lucide-react";
+import React, { useState, useEffect, useMemo } from "react";
+import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy } from "lucide-react";
+import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
+import { doc, getDoc, setDoc, collection, getDocs, addDoc, deleteDoc } from "firebase/firestore";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { db, auth } from "./firebase";
 
-/* ---------------------------------------------------------------------- */
-/* Helpers                                                                */
-/* ---------------------------------------------------------------------- */
+// ---------------------------------------------------------------------------
+// HT MAINTENANCE — OUTIL DE CHIFFRAGE
+// Palette : ardoise/graphite + ambre (couleurs d'atelier électrique HT/BT)
+// ---------------------------------------------------------------------------
 
-const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+const INK = "#1B2733";
+const INK_2 = "#2E3D4E";
+const AMBER = "#E8A33D";
+const PAPER = "#F5F6F4";
+const LINE = "#DCE0E3";
+const MUTED = "#8A93A0";
 
-const money = (n) =>
-  new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" }).format(
-    Number.isFinite(n) ? n : 0
-  );
+const uid = () => Math.random().toString(36).slice(2, 10);
+const STORAGE_KEY = "ht-chiffrage-maintenance-v1";
+const FIRESTORE_DOC = "ht-chiffrage/etat";
+const DEVIS_COLLECTION = "ht-chiffrage-devis";
 
-const fmtDate = (iso) => {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d)) return "—";
-  return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric" });
+// ---------------------------------------------------------------------------
+// Catalogue repris du tableau réel "Niv 1-4 (standard)" du fichier
+// QUO-CHIFFRAGE HT-BT d'origine. Pour chaque équipement : heures totales
+// (niv 1-2 + niv 3-4 + préparation) et amortissement matériel (€, coût fixe
+// indépendant du tarif jour). Prix de revient = (heures ÷ heures/jour) ×
+// prix jour technicien × majoration + amortissement. Avec les valeurs par
+// défaut (1 400 €/j technicien, 7h/jour = 200 €/h), on retombe exactement
+// sur les prix du fichier source.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_TARIFS = {
+  expert: { label: "Expert HT/BT", jour: 1600 },
 };
 
-const today = () => new Date().toISOString().slice(0, 10);
-
-const addDays = (iso, days) => {
-  const d = new Date(iso);
-  d.setDate(d.getDate() + (Number(days) || 0));
-  return d.toISOString().slice(0, 10);
+const DEFAULT_MAJORATIONS = {
+  semaine: { label: "Semaine (jour)", coef: 1 },
+  samedi: { label: "Samedi", coef: 1.55 },
+  nuit: { label: "Nuit", coef: 2 },
+  dimancheFerie: { label: "Dimanche / Férié", coef: 2 },
 };
 
-function computeLineHT(l) {
-  const qte = Number(l.qte) || 0;
-  const pu = Number(l.puHT) || 0;
-  const remise = Number(l.remise) || 0;
-  return qte * pu * (1 - remise / 100);
-}
+const DEFAULT_DEGRESSIVITE = [
+  { min: 0, max: 5, coef: 1, label: "1 à 5 équipements" },
+  { min: 5, max: 10, coef: 0.98, label: "5 à 10 équipements" },
+  { min: 10, max: 20, coef: 0.95, label: "10 à 20 équipements" },
+  { min: 20, max: Infinity, coef: 0.9, label: "Plus de 20 équipements" },
+];
 
-function computeTotals(lignes = [], remiseGlobale = 0, tauxTVA = 0.2) {
-  let sousTotal = 0;
-  lignes.forEach((l) => {
-    sousTotal += computeLineHT(l);
-  });
-  const rg = Number(remiseGlobale) || 0;
-  const totalHT = Math.max(sousTotal - rg, 0);
-  const tva = totalHT * (Number(tauxTVA) || 0);
-  const ttc = totalHT + tva;
-  return { sousTotal, remiseGlobale: rg, totalHT, tva, ttc };
-}
-
-function escapeRegExp(s) {
-  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function fiscalYear(startMonth = 1, dateStr = null) {
-  const d = dateStr ? new Date(dateStr) : new Date();
-  const m = d.getMonth() + 1;
-  let y = d.getFullYear();
-  if (Number(startMonth) > 1 && m < Number(startMonth)) y -= 1;
-  return y;
-}
-
-function nextNumber(list, prefix, field, agencePrefix = "", fiscalStartMonth = 1) {
-  const year = fiscalYear(fiscalStartMonth);
-  const fullPrefix = (agencePrefix ? `${agencePrefix}-` : "") + prefix;
-  const re = new RegExp(`^${escapeRegExp(fullPrefix)}-${year}-(\\d+)$`);
-  let max = 0;
-  list.forEach((d) => {
-    const m = (d[field] || "").match(re);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  });
-  return `${fullPrefix}-${year}-${String(max + 1).padStart(3, "0")}`;
-}
-
-// Tri "naturel" : compare les segments numériques comme des nombres plutôt que
-// comme du texte, pour que PREST-002 se place bien après PREST-001-9, etc.
-function naturalCompare(a, b) {
-  const re = /(\d+)|(\D+)/g;
-  const chunksA = String(a || "").match(re) || [];
-  const chunksB = String(b || "").match(re) || [];
-  const len = Math.max(chunksA.length, chunksB.length);
-  for (let i = 0; i < len; i++) {
-    const ca = chunksA[i] ?? "";
-    const cb = chunksB[i] ?? "";
-    if (ca === cb) continue;
-    const na = /^\d+$/.test(ca) ? parseInt(ca, 10) : null;
-    const nb = /^\d+$/.test(cb) ? parseInt(cb, 10) : null;
-    if (na !== null && nb !== null) return na - nb;
-    return ca < cb ? -1 : 1;
-  }
-  return 0;
-}
-
-function sortByRef(list) {
-  return [...list].sort((a, b) => naturalCompare(a.ref, b.ref));
-}
-
-function daysSince(dateStr) {
-  if (!dateStr) return 0;
-  const d = new Date(dateStr);
-  if (isNaN(d)) return 0;
-  return Math.floor((Date.now() - d.getTime()) / 86400000);
-}
-
-function parseDelaiJours(text, fallback = 30) {
-  const m = String(text || "").match(/\d+/);
-  return m ? parseInt(m[0], 10) : fallback;
-}
-
-/* ---------------------------------------------------------------------- */
-/* Default / seed data                                                    */
-/* ---------------------------------------------------------------------- */
-
-const DEFAULT_SETTINGS = {
-  entreprise: "HT Maintenance",
-  dirigeant: "Thomas",
-  adresse: "",
-  cp: "",
-  ville: "",
-  telephone: "",
-  email: "",
-  siret: "",
-  tvaNum: "",
-  iban: "",
-  bic: "",
-  tauxTVA: 0.2,
-  formeJuridique: "",
-  capitalSocial: "",
-  rcs: "",
-  assuranceRCPro: "",
-  assureur: "",
-  territorialite: "France",
-  delaiPaiement: "30 jours date de facture",
-  tauxPenalites: "Taux BCE + 10 points",
-  escompte: "Aucun escompte",
-  indemniteRecouvrement: 40,
-  tribunal: "Tribunal compétent du ressort du siège de HT Maintenance",
-  dureeGarantie: "3 mois sauf conditions particulières",
-  versionCGV: "V4 - Juillet 2026",
-  clientele: "Professionnels uniquement (B2B)",
-  logoDataUrl: "data:image/png;base64,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",
-  numAgencePrefix: "",
-  numPrefixDevis: "DEV",
-  numPrefixFacture: "FAC",
-  numPrefixCommande: "CDA",
-  numDebutAnneeFiscale: 1,
-  relanceJours: 7,
-  fraisAnnulationPourcentage: 50,
-  seuilAcompteMontant: 3000,
-  acomptePourcentage: 30,
+const DEFAULT_COEF_CONTRAT = {
+  aucun: { label: "Affaire standard", coef: 1 },
+  facilitiesManager: { label: "Facilities Manager", coef: 0.95 },
+  appelOffre: { label: "Concurrence / Appel d'offre", coef: 0.9 },
+  derogation1: { label: "Dérogation commerciale 1", coef: 0.85 },
+  derogation2: { label: "Dérogation commerciale 2", coef: 0.8 },
 };
 
-const SIDEBAR_LOGO_DATA_URI = "data:image/png;base64,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XunuDioqKtiLL74ojj766LOrqqpOys/PF9FoNFY/tm0DgADAPvjggw8ee+yxlyoqKth+0nQQAOrwww9PP/fccyf37NmTS+lUlxACAMQPP/zAXn/99Rc/+OCDD9upPikAyTk/5rrrrrtw8ODBoqmpiTmnlkoAkOnp6fTTTz/9z5/+9Kdnpk+fblRXV1u7k4DO54UXXnjFsGHDesM5KpUCgJRSNDU1seeee27ZggULZuxNmfR/s7Ozj66qqvrNcccdJ5qamlggEICUUpcHbrrwTkDe33b2XTJIKZGWliYaGxvZ9OnTP/z8889f3Ns+5J4cS84666xbR40alS2EUEII4vP5Ws1DW6HrQggBKSVs24ZhGGr58uXk2WefvWfVqlXrlFKEELK3mg4CQJWWluacdNJJNx988MFM55NSCkKICIVCbNasWS+///7779XU1PDd3GERQohSSvHLLrus5uSTT05TSikhBBFCQCkllFJs7ty5bzz77LNv7Y9xrevxpJNO+p/zzz+/SzAY9PZ9+Hw+cM5lJBKhc+fOfe5///d//11bW0v28Typ69E/atSoyWeddVZACKGUUsS2bVBKld/vx0cffSTuu+++yZTSqJSSwnvk8a4TgFKKVFRU3HrmmWdmSykVpZQAAOdcbNmyhb3yyitz33zzzdfau51qamrobbfdJpVS/j59+lz961//uqRv377SMAwKADsTRNoyL1BKhZSSffHFF4unTp36ZDvMy7pue/7ud7+76phjjpFSSqrXVXfNavknTzn0e/2aOPfpV/dSlFLywQcf/PDYY49N3enYr6ioYADAGDvlzTffVO6AU8nwf//3f+rMM88cQCmN/W9PUVFR4QOAo446qvqTTz5Jmp7OxxNPPPEBAMydO7dVtWoHgVRVVRkAMp588smFSiklpWyRT/3dnDlzVEFBwcUVFRVsb+tnT6CUIgBw3XXXFX777bdJ63Tr1q1q/Pjx1wCOenJv0ywtLeUA0L179ysWLVqUNE2llFq7dq266667JgBAfX198lWvFeh2f/zxxz9VSinTNFs8f+TIkR/tbZn0f88777zL16xZ02pZOgrhcFiddtppzwKOanpPywE07yT/+Mc/hpVK3m/bC3qcLlmyRJ1yyilHuXW519tBXQcXXHDBY8naXGPu3LlNp5122gl7UG/E1bAG//KXv7R4rmVZSiml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";
-
-const CGV_INTRO =
-  "Les présentes conditions générales de vente (CGV) régissent les prestations réalisées par HT Maintenance auprès de clients professionnels : maintenance préventive ou corrective, dépannage, assistance technique, diagnostic, audit, conseil, fourniture de pièces ou consommables et prestations connexes. Sauf accord écrit contraire, elles prévalent sur tout autre document du client. Toute commande implique l'acceptation sans réserve des CGV en vigueur à la date du devis ou de la commande.";
-
-const CGV_ARTICLES_DEFAULT = [
-  { titre: "1. Objet et champ d'application", texte: "Les présentes conditions générales de vente (CGV) régissent les prestations réalisées par HT Maintenance auprès de clients professionnels : maintenance préventive ou corrective, dépannage, assistance technique, diagnostic, audit, conseil, fourniture de pièces ou consommables et prestations connexes. Sauf accord écrit contraire, elles prévalent sur tout autre document du client. Toute commande implique l'acceptation sans réserve des CGV en vigueur à la date du devis ou de la commande." },
-  { titre: "2. Formation du contrat et commande", texte: "Le contrat est formé à la réception du devis daté et signé avec la mention « Bon pour accord », d'un bon de commande accepté par HT Maintenance ou de tout accord écrit non équivoque. Toute modification de périmètre, urgence, travail supplémentaire, immobilisation ou intervention non prévue peut faire l'objet d'un avenant ou d'une facturation complémentaire après information du client." },
-  { titre: "3. Prix, frais et révision", texte: "Les prix sont exprimés hors taxes et majorés de la TVA applicable. Les déplacements, péages, hébergements, consommables, locations, pièces et frais spécifiques sont facturés selon le devis ou, à défaut, selon le tarif en vigueur. Les prix sont fermes pendant la durée de validité du devis. Toute évolution réglementaire, fiscale, salariale ou de coût fournisseur affectant substantiellement la prestation peut donner lieu à une proposition de révision avant exécution." },
-  { titre: "4. Interventions en horaires spécifiques", texte: "Les interventions réalisées en dehors des horaires ouvrés habituels (nuit, week-end, jours fériés) ou en urgence à la demande du client font l'objet d'une majoration par rapport au tarif standard, indiquée dans le devis ou, à défaut, selon le barème en vigueur communiqué sur demande. Le client est informé de cette majoration avant le déclenchement de l'intervention, sauf urgence avérée ne permettant pas un accord préalable formalisé." },
-  { titre: "5. Délais et conditions d'intervention", texte: "Les délais sont indicatifs sauf engagement écrit exprès. Le client doit garantir l'accès au site, aux équipements, aux documents techniques, aux autorisations et aux interlocuteurs nécessaires. Toute attente, interruption ou déplacement inutile imputable au client peut être facturé. HT Maintenance peut reporter ou suspendre l'intervention lorsque les conditions techniques, administratives ou de sécurité ne permettent pas une exécution normale." },
-  { titre: "6. Annulation et report d'intervention", texte: "Toute annulation ou tout report d'une intervention planifiée à l'initiative du client doit être notifié à HT Maintenance par écrit dans les meilleurs délais. Toute annulation ou report notifié moins de 24 heures avant la date et l'heure prévues de l'intervention pourra donner lieu à la facturation de frais forfaitaires égaux au pourcentage indiqué dans les paramètres du montant HT de l'intervention prévue, correspondant aux moyens déjà mobilisés (déplacement, réservation de personnel ou de matériel), sauf cas de force majeure dûment justifié. Ces frais restent dus même si l'intervention est ultérieurement replanifiée." },
-  { titre: "7. Sécurité, consignation et obligations du client", texte: "Le client demeure responsable de la sécurité générale de son site, de l'information sur les risques, du plan de prévention lorsqu'il est requis, de la consignation des énergies, de la mise à disposition d'équipements accessibles et d'un environnement conforme. HT Maintenance peut refuser ou interrompre immédiatement toute intervention présentant un danger sérieux ou une non-conformité manifeste, sans que cette décision constitue une faute. Les coûts engagés et le temps mobilisé restent facturables." },
-  { titre: "8. Pièces, fournitures et sous-traitance", texte: "Les pièces et fournitures sont soumises aux disponibilités des fabricants et distributeurs. Les délais annoncés sont indicatifs. Les garanties applicables aux pièces sont celles du fabricant, sauf engagement écrit distinct. HT Maintenance peut recourir à des sous-traitants qualifiés sous sa responsabilité contractuelle, sous réserve des exigences particulières convenues avec le client." },
-  { titre: "9. Réception et réserves", texte: "À l'issue de l'intervention, le client est invité à signer le bon ou rapport d'intervention. Toute réserve portant sur une non-conformité apparente doit être formulée par écrit, de façon précise, dans un délai de cinq jours ouvrés après l'intervention. À défaut, la prestation est réputée acceptée pour ses éléments apparents, sans préjudice des garanties impératives éventuellement applicables." },
-  { titre: "10. Garantie des prestations", texte: "Sauf conditions particulières, HT Maintenance garantit la reprise des seuls défauts directement imputables à l'exécution de sa prestation pendant la durée indiquée dans les paramètres, à compter de la réception. Sont exclus : usure normale, défaut de conception, vétusté, mauvaise utilisation, absence d'entretien, modification par un tiers, pièce fournie ou imposée par le client, environnement non conforme ou non-respect des recommandations." },
-  { titre: "11. Responsabilité", texte: "HT Maintenance répond des dommages directs, prévisibles et prouvés résultant d'une faute dans l'exécution de ses obligations. Sauf faute lourde, dol, atteinte corporelle ou disposition impérative contraire, les dommages indirects tels que perte d'exploitation, perte de production, perte de chiffre d'affaires, perte de données, perte de chance ou pénalités dues à un tiers sont exclus. Sous les mêmes réserves, la responsabilité totale susceptible d'être engagée est plafonnée au montant hors taxes de la prestation à l'origine du dommage. Cette clause doit être adaptée au contrat et aux garanties d'assurance." },
-  { titre: "12. Assurance", texte: "HT Maintenance est titulaire d'une police d'assurance responsabilité civile professionnelle souscrite auprès de l'assureur indiqué dans les paramètres, couvrant les conséquences pécuniaires de sa responsabilité civile pouvant résulter de ses activités. Une attestation d'assurance en cours de validité peut être communiquée au client sur demande. Les plafonds de garantie applicables sont ceux fixés par cette police et prévalent, le cas échéant, sur la clause de plafonnement de responsabilité prévue aux présentes." },
-  { titre: "13. Acompte à la commande", texte: "Pour toute commande dont le montant total hors taxes excède le seuil indiqué dans les paramètres, un acompte égal au pourcentage indiqué dans les paramètres du montant total hors taxes du devis est exigible à la commande, avant le début de l'intervention. En deçà de ce seuil, aucun acompte n'est exigé, sauf mention contraire portée sur le devis. Le solde est facturé selon les modalités prévues à l'article Paiement. HT Maintenance se réserve le droit de ne pas engager la prestation tant que l'acompte convenu n'a pas été réglé." },
-  { titre: "14. Paiement", texte: "Les factures sont payables selon le délai indiqué dans les paramètres et sur la facture. Aucun escompte n'est accordé pour paiement anticipé, sauf mention contraire. Toute contestation doit être adressée par écrit avant l'échéance et ne suspend pas le paiement des sommes non contestées." },
-  { titre: "15. Retard de paiement", texte: "Tout retard entraîne, dès le jour suivant l'échéance et sans rappel préalable, l'application de pénalités calculées au taux indiqué dans les paramètres, sans pouvoir être inférieur au minimum légal. Une indemnité forfaitaire pour frais de recouvrement est due de plein droit pour chaque facture en retard entre professionnels. Une indemnisation complémentaire peut être demandée sur justification lorsque les frais exposés dépassent ce montant. HT Maintenance peut suspendre les prestations et exiger un paiement comptant ou des garanties pour toute nouvelle commande." },
-  { titre: "16. Réserve de propriété", texte: "Les pièces, matériels et fournitures vendus restent la propriété de HT Maintenance jusqu'au paiement intégral du prix, en principal et accessoires. Les risques sont toutefois transférés au client dès la livraison ou la mise à disposition. Le client doit conserver les biens identifiables et assurer leur protection jusqu'au paiement complet." },
-  { titre: "17. Force majeure et événements extérieurs", texte: "Aucune partie ne sera responsable d'un manquement causé par un événement échappant raisonnablement à son contrôle et empêchant l'exécution de ses obligations. La partie concernée informe l'autre dans les meilleurs délais. Les obligations empêchées sont suspendues pendant la durée de l'événement ; si l'empêchement se prolonge au-delà de trente jours, les parties se rapprochent pour convenir de la poursuite ou de la résiliation des prestations concernées." },
-  { titre: "18. Confidentialité et propriété intellectuelle", texte: "Chaque partie protège les informations confidentielles reçues dans le cadre de la relation. Les méthodes, modèles, trames, rapports-types, procédures et savoir-faire préexistants de HT Maintenance restent sa propriété. Le client dispose d'un droit d'utilisation interne des livrables payés, limité à ses besoins propres, sauf cession écrite distincte." },
-  { titre: "19. Protection des données personnelles (RGPD)", texte: "Les données à caractère personnel communiquées par le client (contacts, interlocuteurs, coordonnées) sont traitées par HT Maintenance en qualité de responsable de traitement, aux seules fins de gestion commerciale, contractuelle, comptable et de sécurité des interventions, sur la base de l'exécution du contrat et de l'intérêt légitime des parties. Ces données sont conservées pendant la durée de la relation commerciale, augmentée des délais légaux de prescription et de conservation comptable. Les personnes concernées disposent d'un droit d'accès, de rectification, d'effacement, de limitation et d'opposition, exerçable auprès de HT Maintenance aux coordonnées indiquées dans les paramètres, ainsi que d'un droit de réclamation auprès de la CNIL. HT Maintenance s'engage à ne pas transférer ces données hors de l'Union européenne sans garanties appropriées et à mettre en œuvre des mesures de sécurité adaptées." },
-  { titre: "20. Non-débauchage du personnel", texte: "Pendant la durée de la relation contractuelle et pendant une durée de douze mois suivant son terme, le client s'engage à ne pas solliciter, embaucher ou faire travailler, directement ou indirectement, tout salarié ou sous-traitant de HT Maintenance ayant été affecté à l'exécution des prestations, sauf accord écrit préalable de HT Maintenance. Toute violation de cette clause pourra donner lieu au versement d'une indemnité forfaitaire équivalente à douze mois de rémunération brute de la personne concernée, sans préjudice de tout autre dommage justifié." },
-  { titre: "21. Cession du contrat", texte: "Le client ne peut céder, transférer ou apporter à un tiers, à titre onéreux ou gratuit, tout ou partie de ses droits et obligations au titre du contrat sans l'accord écrit préalable de HT Maintenance. HT Maintenance peut céder le contrat, notamment dans le cadre d'une cession ou restructuration de son activité, sous réserve d'en informer le client." },
-  { titre: "22. Résiliation et suspension", texte: "En cas de manquement grave non réparé dans un délai raisonnable après mise en demeure, l'autre partie peut résilier la commande concernée, sans préjudice des sommes dues et dommages éventuellement justifiés. HT Maintenance peut suspendre immédiatement une prestation en cas d'impayé, de danger, d'absence d'autorisation, de défaut de coopération ou de risque manifeste de non-paiement." },
-  { titre: "23. Droit applicable et règlement des litiges", texte: "Le contrat est soumis au droit français. Les parties s'efforcent de résoudre amiablement tout différend. À défaut d'accord amiable, le tribunal compétent est celui désigné dans les paramètres, sous réserve des règles impératives de compétence. Une clause attributive de compétence n'est opposable qu'entre professionnels lorsqu'elle est spécifiée de façon très apparente." },
-  { titre: "24. Hiérarchie contractuelle et divisibilité", texte: "En cas de contradiction, les conditions particulières du devis ou du bon de commande expressément acceptées prévalent sur les présentes CGV. La nullité éventuelle d'une clause n'affecte pas les autres dispositions. Le fait de ne pas se prévaloir d'un droit ne vaut pas renonciation." },
-];
-
-const SEED_CATALOG = [
-  { id: uid(), ref: "PREST-001", designation: "Journée de maintenance industrielle", unite: "Jour", prixHT: 700, actif: true },
-  { id: uid(), ref: "PREST-002", designation: "Demi-journée de maintenance industrielle", unite: "Demi-journée", prixHT: 400, actif: true },
-  { id: uid(), ref: "PREST-003", designation: "Intervention urgente / dépannage", unite: "Heure", prixHT: 120, actif: true },
-  { id: uid(), ref: "PREST-004", designation: "Assistance technique", unite: "Heure", prixHT: 95, actif: true },
-  { id: uid(), ref: "PREST-005", designation: "Frais de déplacement", unite: "Forfait", prixHT: 80, actif: true },
-  { id: uid(), ref: "PREST-006", designation: "Kilomètre supplémentaire", unite: "Km", prixHT: 0.75, actif: true },
-  { id: uid(), ref: "PREST-007", designation: "Fournitures et consommables", unite: "Forfait", prixHT: 0, actif: true },
-];
-
-const SEED_FOURNISSEURS = [
-  { id: uid(), raisonSociale: "AAIREL", specialite: "VENTILATEURS NMB, COMMONWEAL TH, ADDA", marques: "NMB, COMMONWEAL TH, ADDA", contact: "PATRICK BOCQUEL", telephone: "03 44 25 21 17", email: "contact@aairel.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ABB", specialite: "pieces BT", marques: "ABB", contact: "Corentin GUISTI", telephone: "673197876", email: "corentin.guisti@fr.abb.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ADDIS", specialite: "CONDO AC -DC", marques: "KEMET - VISHAY", contact: "", telephone: "", email: "clement.pinson@addis.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "AE SERVICE", specialite: "VENTILATEUR - CONDO", marques: "KENDEIL - KEMET - DUCATI", contact: "MATHIAS MONTAGNON", telephone: "06 71 46 00 86", email: "aeservice@aeservice.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ALS Belgique", specialite: "PIECES DETACHEES HT + BT", marques: "MULTI MARQUES", contact: "JOHAN MATHIEU", telephone: "32473231958", email: "info@alsservice.be", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "AMK LUX", specialite: "BATTERIES EXIDE", marques: "EXIDE", contact: "Alexandre MORIN", telephone: "+33(0)6 63 80 03 62", email: "battery@amklux.com supportamklux@protonmail.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ARDELEC", specialite: "", marques: "", contact: "LEPEZ Geoffrey", telephone: "06 22 24 01 98", email: "g.lepez@ardelec-energie.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "BATTERIES SOLAIRE", specialite: "BATTERIES", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "BEST BATTERIE", specialite: "BATTERIES", marques: "LEOCH", contact: "Karine ROBERT", telephone: "07 89 27 05 49", email: "karine.robert@best-batterie.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "BLUEWALKER", specialite: "", marques: "", contact: "", telephone: "", email: "g.tamo@bluewalker.de", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "BOURS'ELEC", specialite: "PIECES DETACHEES HTA / BT", marques: "", contact: "", telephone: "", email: "frederic.florent@bourse-elec.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "BSAV", specialite: "SOUS-TRAITANCE / SOUS-TRAITANCE REGION OCCITANIE PACA", marques: "", contact: "ERIC JEANSON", telephone: "01 69 02 11 82", email: "e.jeanson@bsav.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "CATER ACCESS", specialite: "FUSIBLES HTA", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "CHLORIDE", specialite: "REC - NEUF / REC - PIECES DETACHEES", marques: "EMERSON", contact: "RAPHAELLE CHANTRE", telephone: "676581599", email: "raphaelle.chantre@chloride.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "CONDO SERVICE", specialite: "CONDO AC-DC", marques: "DUCATI - KEMET - VISHAY", contact: "", telephone: "", email: "info@condoservices.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "DISTRELEC", specialite: "CONDO AC - DC - VENTILATEUR", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "DOMINIT", specialite: "PFC DOMINIT", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "EATON", specialite: "PIECES DETACHEES ONDULEURS", marques: "EATON", contact: "JEROME SANTENS", telephone: "06 76 74 27 02", email: "jeromesantens@eaton.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ECOMAL", specialite: "CONDOS AC - DC", marques: "VISHAY", contact: "FLORENCE JAMBART", telephone: "01 30 79 17 56", email: "florence.jambart@ecomal.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ECOMAL Belgique", specialite: "CONDENSATEURS VISHAY", marques: "VISHAY", contact: "", telephone: "", email: "Kelly.deWitte@ecomal.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ECUS", specialite: "COFFRET BYPASS", marques: "", contact: "", telephone: "", email: "gil@ecus.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ELEC-API", specialite: "", marques: "EBMPAPST", contact: "", telephone: "03.83.57.33.70", email: "elecapi-nancy@etn.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ELECTIS", specialite: "FUSIBLES HTA", marques: "", contact: "Mickael GROSS", telephone: "", email: "mgross@electis.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ELECTRO FLANDRIA Belgique", specialite: "CONTACTEUR LOVATO", marques: "", contact: "", telephone: "", email: "info@electroflandria.be", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ELECTRO-RHIN STRASBOURG", specialite: "VENTILATEUR (REVENDEUR EBMPAPST)", marques: "EBMPAPST", contact: "JOEL DEWDHORY", telephone: "", email: "jdewdhory@etn.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "EM-DISTRIBUTION", specialite: "", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ENERSYS", specialite: "BATTERIES ENERSYS", marques: "ENERSYS", contact: "PIERRE IRZEN", telephone: "06 09 33 59 56", email: "pierre.izern@fr.enersys.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ERIKS", specialite: "JOINT CUVE DEOCUPABLE POUR TRANSFOS", marques: "", contact: "YANN BLANCHETIERE", telephone: "04 72 05 46 41", email: "yann.blanchetiere@eriks.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "EXIDE", specialite: "BATTERIES EXIDE", marques: "EXIDE", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "FARNELL", specialite: "CONDO AC - DC - VENTILATEUR", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "FFR INDUSTRIE", specialite: "JOINT CUVE SUR MESURE POUR TRANSFORMATEUR", marques: "", contact: "", telephone: "03 61 17 23 20", email: "consultation@ffrindustrie.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "FIAMM", specialite: "BATTERIES", marques: "FIAMM", contact: "CHRISTIAN DHAINAUT", telephone: "175909045", email: "christian.dhainaut@fiamm.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "FITEC (SITE INTERNET)", specialite: "BATTERIES", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "GOUNOT", specialite: "MATERIEL ELECTRIQUE HTA ( SCHNEIDER, MERLIN GERIN, CAHORS, POMMIER, ARVEA, ALSTOM, ABB)", marques: "", contact: "XAVIER TEXIER", telephone: "145109272", email: "x.texier@gounot.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "HUAWEI", specialite: "UPS - 1ER CONTACT / UPS - 2E CONTACT SI PAS DE REP DU 1ER", marques: "", contact: "JULIEN PAYNEL", telephone: "615835853", email: "julien.paynel@huawei.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ICAR", specialite: "CONDO AC / contacteurs (info de socomec pour les PFC avec du LOVATO)", marques: "ICAR", contact: "", telephone: "160183902", email: "filialefrance@icar.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "LEGRAND (PFC)", specialite: "PIECES DETACHEES (PFC) - GAMME ALPES TECHNOLOGIES", marques: "LEGRAND", contact: "JEREMY LENIN", telephone: "06 81 72 49 67", email: "jeremy.lenin@legrand.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "LEGRAND (UPS)", specialite: "PIECE DETACHE UPS LEGRAND ET S2S", marques: "LEGRAND", contact: "Fabrizio GAROFALO", telephone: "03 88 76 55 79", email: "fabrizio.garofalo@legrand.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "LEOCH France S.A.S.U", specialite: "BATTERIES", marques: "LEOCH", contact: "MARC FLEURET", telephone: "678859789", email: "marc.fleuret@leoch.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "MASTER ECO", specialite: "BATTERIES", marques: "", contact: "", telephone: "", email: "ventes@master-eco.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "MATERIELS ELECTRIQUES", specialite: "", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "MOUSER", specialite: "CONDO AC - DC - VENTILATEUR", marques: "", contact: "", telephone: "", email: "france@mouser.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "MVI", specialite: "VENTILATEURS", marques: "EBMPAPST", contact: "Marc DUFOURNET", telephone: "160183030", email: "marc.dufournet@mvi-sa.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "REV'ELEC", specialite: "MATERIEL ELECTRIQUE HTA", marques: "", contact: "YVES ROUETTE", telephone: "556624775", email: "sarlrevelec@orange.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "REXEL", specialite: "", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "RIELLO", specialite: "BATTERIES / PIECES DETACHEES UPS", marques: "YUASA - EXIDE", contact: "ETHENOZ MAGALY", telephone: "", email: "methenoz@riello-ups.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "RS ONLINE", specialite: "", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SA3I", specialite: "ENVOI BON DE COMMANDE / PIECES DETACHEES UPS SCHNEIDER ELECTRIC", marques: "APC BY SCHNEIDER ELECTRIC", contact: "", telephone: "634696932", email: "charline.frederic@sa3i.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SADTEM", specialite: "TC - TT", marques: "MULTI MARQUES", contact: "Fabrice GERNEZ", telephone: "03 27 71 32 45", email: "fgernez@sadtem.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SAFT", specialite: "BATTERIES", marques: "SAFT", contact: "", telephone: "442874142", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SCHNEIDER ELECTRIC", specialite: "ADRESSE MAIL GENERIC A UTILISER POUR TOUTES DEMANDE DE PRIX (VOIR LIEN PROCEDURE) / METTRE EN COPIE DE TOUTES DEMANDE", marques: "", contact: "", telephone: "", email: "schneider.devis@se.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SEMENS France", specialite: "", marques: "", contact: "ANNE-LAURE TARRICONE", telephone: "01.85.57.00.00", email: "anne-laure.tarricone@siemens.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SERMES", specialite: "PIECES PFC", marques: "SERMES", contact: "OBERLE Raphael", telephone: "388407258", email: "raphael-oberle@sermes.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SERV TRAYVOU INTERVERROUILLAGE", specialite: "BON DE COMMANDE / CLE (DDE PRIX)", marques: "", contact: "", telephone: "01 48 18 12 71", email: "sales@servtrayvou.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SES - Société Européenne de Services", specialite: "", marques: "LOVATO", contact: "Damien LESNE", telephone: "04.74.65.26.66", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SEVES", specialite: "pièces détachées UPS", marques: "SCHNEIDER, ETC", contact: "BARDEAU Nicolas", telephone: "07 85 31 91 29", email: "nicolas.bardeau@seves.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SIEMENS France", specialite: "BOBINE A MANQUE", marques: "", contact: "ANTOINE RYCKEWAERT", telephone: "", email: "antoine.ryckewaert@siemens.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SOCOMEC MARLY", specialite: "PFC / PFC - AGENCE", marques: "SOCOMEC", contact: "Frédéric LUDEMANN", telephone: "03 87 62 55 19", email: "frederic.ludemann@socomec.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SOCOMEC PARIS", specialite: "UPS", marques: "SOCOMEC", contact: "Mélanie BRUYLANTS", telephone: "01 45 14 63 13", email: "melanie.bruylants@socomec.com", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SONEPAR", specialite: "MATERIELS ELECTRIQUES", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "STE BOUDIN", specialite: "PIECES DETACHEES HTA - BT (ENTREPRISE DE NEGOCE DE LOCATION DE MATERIEL ELECTRIQUE - HT BT NEUF OU OCCASION)", marques: "", contact: "JEAN-LOUIS BOUDIN", telephone: "614498464", email: "Jean-louis.boudin@wanadoo.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SUPER VISOR", specialite: "", marques: "", contact: "", telephone: "", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "TABEL", specialite: "MATERIEL POUR LA BT ( SCHNEIDER, LEGRAND, HAGER)", marques: "", contact: "Aurélien SELLE", telephone: "235752768", email: "tabel@orange.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "VISION", specialite: "BATTERIES", marques: "", contact: "VALENTIN THOPART", telephone: "06 77 02 76 70", email: "thopartv@vision-batt.eu", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "AVRITEC", specialite: "JOINTS TRANSFORMATEURS", marques: "", contact: "PIERRE BIEUZENT", telephone: "02 35 49 63 63", email: "pierre.bieuzent@avritec.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "ANFRAY", specialite: "JOINTS TRANSFORMATEURS", marques: "", contact: "VERONIQUE BENTZ", telephone: "02 32 14 61 06", email: "anfray@anfray.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "SCHROLL (BENNE)", specialite: "N° COMPTE A DONNER A CHAQUE DEMANDE : CT029550", marques: "", contact: "Céline SCHRAMM", telephone: "03 53 63 23 55", email: "", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "FOSELEV NORMANDIE ROUEN", specialite: "LOCATION CAMION GRUE", marques: "", contact: "STALLIN JEAN-CHRISTOPHE", telephone: "06 24 10 18 02", email: "jean-christophe.stalin@foselev.fr", adresse: "", cp: "", ville: "" },
-  { id: uid(), raisonSociale: "EFIRE", specialite: "FABRICANT ET DISTRIBUTEUR DE JOINTS", marques: "", contact: "DAVID THIEL", telephone: "06 98 81 57 68", email: "d.thiel@groupe-efire.com", adresse: "", cp: "", ville: "" },
-];
-
-const SEED_CLIENTS_IMPORT = [
-  { id: uid(), code: "CLI-0001", societe: "05 RUE DE LA BAUME", contact: "", adresse: "XXX", cp: "75008", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0002", societe: "100 ROUTE DE VERSAILLES", contact: "", adresse: "100 ROUTE DE VERSAILLES", cp: "78372", ville: "MARLY LE ROI", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0003", societe: "122 RUE DE RIVOLI", contact: "", adresse: "122 RUE DE RIVOLI", cp: "75001", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0004", societe: "13EME BATAILLON DES CHASSEURS ALPINS / BARBY", contact: "", adresse: "QUARTIER ROCK NOIR, 626 AVENUE RENE CASSIN", cp: "73200", ville: "BARBY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0005", societe: "23 ITALIE", contact: "", adresse: "23 AVENUE D'ITALIE", cp: "75013", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0006", societe: "3M FRANCE", contact: "", adresse: "BOULEVARD DE L'OISE", cp: "95000", ville: "CERGY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0007", societe: "47 AVENUE GEORGES 5 PARIS 8", contact: "", adresse: "47 AVENUE GEORGES 5", cp: "75008", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0008", societe: "9° RSAM DE MONTAUBAN", contact: "", adresse: "700 AVENUE DE NEGREPELISSE", cp: "82077", ville: "MONTAUBAN CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0009", societe: "AAF FRANCE", contact: "", adresse: "3 RUE WILLIAM DIAN", cp: "27620", ville: "GASNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0010", societe: "ACIERIES HACHETTE ET DRIOUT", contact: "", adresse: "11 AVENUE DU GENERAL SARRAIL", cp: "52100", ville: "ST DIZIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0011", societe: "ACTEMIUM", contact: "", adresse: "15 RUE DE LA FORET", cp: "67550", ville: "VENDENHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0012", societe: "ACTEMIUM", contact: "", adresse: "60 CHEMIN DU MOULIN CARRON", cp: "69570", ville: "DARDILLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0013", societe: "ACTEMIUM / SEES", contact: "", adresse: "9 RUE AUGUSTE MOTTIN", cp: "61500", ville: "SEES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0014", societe: "ACTEMIUM AMIENS", contact: "", adresse: "39 Rue de Québec, CS 50049", cp: "80090", ville: "Amiens", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0015", societe: "ACTEMIUM DOUVRIN MANUFACTURING", contact: "", adresse: "235 RUE DE LISBONNE, PARC DES INDUSTRIES ARTOIS FLANDRES", cp: "62138", ville: "DOUVRIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0016", societe: "ACTEMIUM PAYS DE GEX", contact: "", adresse: "134 RUE GUSTAVE EIFFEL", cp: "01630", ville: "SAINT GENIS POUILLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0017", societe: "ACTICALL TOUL", contact: "", adresse: "CHEZ KLEBER 100 ZI CROIX DE METZ", cp: "54200", ville: "TOUL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0018", societe: "ADAGIO ILLKIRCH", contact: "", adresse: "106 Avenue de Strasbourg", cp: "67400", ville: "Illkirch-Graffenstaden", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0019", societe: "ADEQWATTS ENERGIES", contact: "", adresse: "9 Rue Ernest Goüin", cp: "78290", ville: "Croissy-sur-Seine", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0020", societe: "ADIS", contact: "", adresse: "12 AVENUE PIERRE MENDES France, CS10144", cp: "67312", ville: "SCHILTIGHEIM CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0021", societe: "ADLER PELZER FRANCE GRAND-EST SAS", contact: "", adresse: "16 RUE COLBERT", cp: "67390", ville: "MARCKOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0022", societe: "ADM BAZANCOURT SASU", contact: "", adresse: "114 rue de Pomacle, CS30004", cp: "51110", ville: "BAZANCOURT CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0023", societe: "AEG POWER SOLUTIONS", contact: "", adresse: "5 Rue Thérèse Planiol", cp: "37170", ville: "CHAMBRAY-LES-TOURS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0024", societe: "AEMA RUEIL MONIER", contact: "", adresse: "9 RUE HENRI STE CLAIRE DEVILLE", cp: "92500", ville: "RUEIL MALMAISON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0025", societe: "AEROPORT BALE MULHOUSE (EUROAIRPORT)", contact: "", adresse: "AEROGARE / QUAI DE LIVRAISON, BP 60120", cp: "68304", ville: "SAINT LOUIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0026", societe: "AEROPORT INTERNATIONAL STRASBOURG", contact: "", adresse: "DIRECTION ADMINISTRATIVE ET FINANCIERE / SERVICE COMPTABILITE, RD - 221. ROUTE DE L'AEROPORT", cp: "67960", ville: "ENTZHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0027", societe: "AG2R LA MONDIALE", contact: "", adresse: "54 Rue Servient", cp: "69003", ville: "Lyon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0028", societe: "AGENCE SPATIALE EUROPEENNE", contact: "", adresse: "", cp: "75015", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0029", societe: "AGIPI", contact: "Guillaume BRUCKMANN, guillaume.bruckmann@agipi.com, 06 61 98 97 32", adresse: "12 AVENUE PIERRE MENDES FRANCE", cp: "67312", ville: "SCHILTIGHEIM CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0030", societe: "AHLSTROM LA GERE", contact: "", adresse: "Z.A. DES FORGES, RUE FRANCISQUE CARTALLIER", cp: "38780", ville: "PONT EVEQUE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0031", societe: "AHLSTROM-MUNKSJO (ARJO WIGGINS)", contact: "", adresse: "USINE D'ARCHES, 48 ROUTE DE REMIREMONT", cp: "88380", ville: "ARCHES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0032", societe: "AHLSTROM-SPECIALTIES (EX AHLSTROM SPECIALTIES)", contact: "", adresse: "364 IMPASSE LOUIS CHAMPIN, ZI L'ABBAYE", cp: "38780", ville: "PONT-EVEQUE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0033", societe: "AIR FRANCE INVALIDES", contact: "", adresse: "6-7 RUE PAUL ET JEAN LEROLLE", cp: "75007", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0034", societe: "AJINOMOTO HAMBURG", contact: "", adresse: "HAMBURG BRANCH, LUDWIG-ERHARD-STASSE 20", cp: "20459", ville: "HAMBURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0035", societe: "AJINOMOTO MESNIL SAINT NICAISE", contact: "", adresse: "48 RUE DE NESLE, BP 42", cp: "80190", ville: "MESNIL SAINT NICAISE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0036", societe: "AKZONOBEL FRANCE", contact: "", adresse: "ZI LES BAS PRES", cp: "60761", ville: "MONTATAIRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0037", societe: "ALD CLICHY / CHILLY MAZARIN", contact: "", adresse: "15 Allée De L’Europe", cp: "92110", ville: "Clichy", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0038", societe: "ALEM ASSISTANCE LOGISTIQUE ENERGIE MAINTENANCE", contact: "", adresse: "60 Avenue Chanoine Cartellier", cp: "69230", ville: "Saint-Genis-Laval", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0039", societe: "ALLGAIER", contact: "", adresse: "RUE DR DIETER HUNDT, ZONE INDUSTRIELLE B.P.51", cp: "57380", ville: "FAULQUEMONT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0040", societe: "ALLIANCE - MIM", contact: "", adresse: "22 Rue de l'europe", cp: "25410", ville: "Saint-Vit", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0041", societe: "ALLIANZ", contact: "", adresse: "28 RUE DE BONNEL", cp: "69003", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0042", societe: "ALSACE COLLECTIVITE EUROPEENE", contact: "", adresse: "PLACE DU QUARTIER BLANC", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0043", societe: "ALSACE LAIT", contact: "", adresse: "19 RUE DE L'INDUSTRIE, BP 140", cp: "67720", ville: "HOERDT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0044", societe: "ALSAPAN MARLENHEIM", contact: "", adresse: "1 RUE DE L'EUROPE", cp: "67520", ville: "MARLENHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0045", societe: "ALSAPAN SAS", contact: "", adresse: "17 RUE GEORGES BESSE", cp: "67150", ville: "ERSTEIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0046", societe: "ALSTOM TRANSPORT LE CREUSOT", contact: "", adresse: "105 Allée Albert Einstein", cp: "71200", ville: "Le Creusot", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0047", societe: "ALUTEC", contact: "", adresse: "231 CHEMIN DU TENEMENT", cp: "38260", ville: "NANTOIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0048", societe: "AMAZON / VILLENEUVE LES BOULOCS", contact: "", adresse: "21 rue du Girou", cp: "31620", ville: "VILLENEUVE LES BOULOCS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0049", societe: "AMAZON LILLE 1", contact: "", adresse: "PARC ACTIVITES LAUWIN PLANQUER, 1 RUE AMAZON", cp: "59553", ville: "LAUWIN PLANQUE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0050", societe: "AMCOR FLEXIBLES CAPSULES", contact: "", adresse: "RUE PAUL SABATIER", cp: "71100", ville: "CHALON SUR SAONE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0051", societe: "AMCOR FLEXIBLES SARREBOURG", contact: "", adresse: "48 ROUTE DE SARREGUEMINES, BP 50014", cp: "57402", ville: "SARREBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0052", societe: "AMCOR FLEXIBLES SELESTAT SAS", contact: "", adresse: "2 RUE FREDERIC MEYER", cp: "67600", ville: "SELESTAT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0053", societe: "AMCOR TOBACCO PACKAGING FRANCE SAS", contact: "", adresse: "RUE DES VIOLETTES", cp: "68190", ville: "UNGERSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0054", societe: "AMORA MAILLE SOCIETE INDUSTRIELLE", contact: "", adresse: "3 RUE DES SERRURIERS", cp: "21800", ville: "CHEVIGNY SAINT SAUVEUR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0055", societe: "AMPLITUDE VALENCE", contact: "", adresse: "11 COURS JACQUES OFFENBACH", cp: "26000", ville: "VALENCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0056", societe: "APERAM STAINLESS FRANCE ISBERGUES", contact: "", adresse: "Rue Roger Salengro", cp: "62330", ville: "Isbergues", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0057", societe: "APERAM STAINLESS PRECISION", contact: "", adresse: "2 PLACE GENERAL DE GAULLE", cp: "25150", ville: "PONT-DE-ROIDE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0058", societe: "APHELION", contact: "", adresse: "62 RUE CAMILLE DESMOULINS", cp: "92130", ville: "ISSY LES MOULINEAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0059", societe: "APICIL CALUIRE", contact: "", adresse: "38 RUE FRANCOIS PEISSEL", cp: "69300", ville: "CALUIRE-ET-CUIRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0060", societe: "APICIL VAISE", contact: "", adresse: "22 RUE FELIX MANGINI", cp: "69009", ville: "LYON VAISE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0061", societe: "APRR ALSACE-FRANCHE-COMTÉ", contact: "", adresse: "DIRECTION REGIONALE RHIN, ALSACE FRANCHE COMTE, ZAC DE VALENTIN", cp: "25048", ville: "BESANÇON CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0062", societe: "APRR CHAMPAGNE-LORRAINE", contact: "", adresse: "DIRECTION REGIONALE, CHAMPAGNE LORRAINE, BP 2060", cp: "52902", ville: "CHAUMONT CEDEX 9", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0063", societe: "ARCELORMITAL (GEPOR) / ILLANGE", contact: "", adresse: "GEPOR PORT PRIVE", cp: "57192", ville: "FLORANGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0064", societe: "ARCELORMITTAL REVIGNY", contact: "", adresse: "Avenue du 15ème Corps", cp: "55800", ville: "Revigny-sur-Ornain", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0065", societe: "ARCELORMITTAL WIRE FRANCE", contact: "", adresse: "25 AVENUE DE LYON", cp: "01000", ville: "BOURG EN BRESSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0066", societe: "ARCHEOLOGIE ALSACE", contact: "", adresse: "11 RUE FRANCOIS CHAMPOLLION", cp: "67600", ville: "SELESTAT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0067", societe: "ARCHIVES DEPARTEMENTALES", contact: "JEAN NEUVIEME", adresse: "6 RUE PHILIPPE DOLLINGER", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0068", societe: "ARCHIVES MUSEE DE LA MARINE 93 DUGNY", contact: "", adresse: "1 Rue Sébastien et Jacques Lorenzi", cp: "93440", ville: "Dugny", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0069", societe: "ARLANXEO EMULSION RUBBER FRANCE SAS", contact: "", adresse: "7 RUE DU RIED", cp: "67610", ville: "LA WANTZENAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0070", societe: "ARRAINCOURT BIOGAZ", contact: "JEAN-PAUL MALTEMPI , jean-paul.maltempi@dalkia.fr, 06 29 79 17 11", adresse: "", cp: "57380", ville: "ARRAINCOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0071", societe: "ARS NANCY", contact: "", adresse: "3 BVD JOFFRE", cp: "54000", ville: "NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0072", societe: "ARTE", contact: "", adresse: "4 QUAI DU CHANOINE WINTERER, BP 20035", cp: "67080", ville: "STRASBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0073", societe: "ARTESIENNE DE MINOTERIE", contact: "", adresse: "8 Rue du Moulin", cp: "62490", ville: "Vitry-en-Artois", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0074", societe: "ARTHUR METZ", contact: "", adresse: "25 RUE DES BERGERS", cp: "67680", ville: "EPFIG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0075", societe: "ASSEMBLEE NATIONALE", contact: "", adresse: "233 BOULEVARD SAINT GERMAIN", cp: "75355", ville: "PARIS 07 SP", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0076", societe: "ASSOCIATION ADELE DE GLAUBITZ", contact: "", adresse: "76 AVENUE DU NEUHOF", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0077", societe: "ASSOCIATION NOTRE DAME DE BON SECOURS", contact: "", adresse: "68 RUE DES PLANTES", cp: "75014", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0078", societe: "ATALIAN EUROGEM MANAGEMENT RUEIL", contact: "", adresse: "IMMEUBLE ROOSEVELT", cp: "92500", ville: "RUEIL MALMAISON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0079", societe: "ATALIAN EUROGEM PARIS", contact: "", adresse: "110 RUE DE L'OURCQ", cp: "75019", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0080", societe: "ATE (ALSACE TECHNIQUES ETIQUETAGE)", contact: "", adresse: "31 Rue du Cerf", cp: "67350", ville: "Uberach", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0081", societe: "ATELIER TRAM KIBITZENAU", contact: "", adresse: "KIBITZENAU", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0082", societe: "AUCHAN LA DUCHERE", contact: "", adresse: "3 RUE VICTOR SCHOELCHER", cp: "69009", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0083", societe: "AURAL STRASBOURG", contact: "", adresse: "20 AVENUE MOLIERE", cp: "67200", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0084", societe: "AUTOCABLE SARL", contact: "", adresse: "1 RUE DE LA CLAIRIERE", cp: "68290", ville: "MASEVAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0085", societe: "AUTOMOTIVE LIGHTING / ST JULIEN DU SAULT 89", contact: "", adresse: "ZI LES MANTEAUX", cp: "89330", ville: "SAINT JULIEN DU SAULT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0086", societe: "AUTOMOTIVE LIGHTING (MARRELI) / 89", contact: "", adresse: "", cp: "", ville: "", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0087", societe: "AVENEL", contact: "", adresse: "24 RUE CHARLES EDOUARD JEANNERET", cp: "78306", ville: "POISSY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0088", societe: "AVIA AIRE DE SORGUES", contact: "", adresse: "A7 SENS AVIGNON /ORANGE", cp: "84700", ville: "Sorgues", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0089", societe: "AXIMA - EQUANS (AGENCE LORRAINE) - METZ", contact: "", adresse: "3, RUE JOSEPH CUGNOT", cp: "57070", ville: "METZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0090", societe: "AZUR PRODUCTION", contact: "", adresse: "BASE AERIENNE DE CHAMBLEY", cp: "54890", ville: "ONVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0091", societe: "BA - CENTRE RADIO HAUTRE FREQUENCE PERTHES", contact: "", adresse: "RUE DE TAGNON", cp: "08300", ville: "PERTHES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0092", societe: "BAKER HUGHES", contact: "", adresse: "AVENUE GUSTAVE EIFFEL", cp: "71200", ville: "LE CREUSOT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0093", societe: "BALLASTIERES WERNY SAS", contact: "", adresse: "17 RUE D'ARTZNHEIM", cp: "67390", ville: "MARCKOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0094", societe: "BANQUE DE FRANCE 77 NOISIEL", contact: "", adresse: "2BIS Avenue Pierre Mendès-France", cp: "77186", ville: "Noisiel", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0095", societe: "BANQUE DE FRANCE LYON", contact: "", adresse: "64 RUE PIERRE SEMARD", cp: "69007", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0096", societe: "BARRY CALLEBAUT", contact: "", adresse: "RUE DE LA MÉCANIQUE", cp: "27400", ville: "LOUVIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0097", societe: "BASE AERIENNE 102 DIJON", contact: "", adresse: "BASE AERIENNE 102", cp: "21998", ville: "DIJON ARMEES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0098", societe: "BASE AERIENNE 107 - VELIZY VILLACOUBLAY", contact: "", adresse: "Route de Gisy", cp: "78140", ville: "Vélizy-Villacoublay", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0099", societe: "BASE AERIENNE 113 (ST DIZIER)", contact: "", adresse: "BATIMENT N6 - USID SIM2", cp: "52113", ville: "ST DIZIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0100", societe: "BASE AERIENNE 115 ORANGE-CARITAT", contact: "", adresse: "CHEMIN DU BACHAGA BOULALEM", cp: "84100", ville: "ORANGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0101", societe: "BASE AERIENNE 118 MONT-DE-MARSAN", contact: "", adresse: "AVENUE COLONEL K. W. ROZANOFF", cp: "40000", ville: "MONT-DE-MARSAN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0102", societe: "BASE AERIENNE 126 / SERRA DI PIGNO", contact: "", adresse: "SOLENZARA-VENTISERI", cp: "20200", ville: "SERRA DI PIGNO", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0103", societe: "BASE AERIENNE 126 SOLENZARA - CORSE", contact: "", adresse: "RN 198", cp: "20240", ville: "VENTISERI", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0104", societe: "BASE AERIENNE 701 SALON DE PROVENCE", contact: "", adresse: "CHEMIN SAINT JEAN", cp: "13661", ville: "SALON DE PROVENCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0105", societe: "BASE AERIENNE 720 - CAEN CARPIQUET", contact: "", adresse: "104 CHEMIN DES 4 ACRES", cp: "14760", ville: "BRETTEVILLE SUR ODON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0106", societe: "BASE AERIENNE 942 LYON MONT-VERDUN", contact: "", adresse: "ESICAERO", cp: "69250", ville: "POLEYMIEUX-AU-MONT-D'OR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0107", societe: "BASE AERIENNE N°110 - CREIL", contact: "", adresse: "ALLEE DU LIEUTENANT MAURICE CHORON", cp: "60100", ville: "CREIL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0108", societe: "BASE AERIENNE N°116 - LUXEUIL", contact: "", adresse: "", cp: "70300", ville: "SAINT SAUVEUR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0109", societe: "BASE AERIENNE N°123 - ORLEANS BRICY", contact: "", adresse: "RUE DE LA BASE", cp: "45140", ville: "BOULAY LES BARRES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0110", societe: "BASE AERIENNE N°901 - EAR DRACHENBRONN", contact: "", adresse: "99 RUE DU CAMP", cp: "67167", ville: "WISSEMBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0111", societe: "BASE ALAT - ETAIN-ROUVRES", contact: "", adresse: "BASE D'ETAIN ROUVRES", cp: "55400", ville: "ETAIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0112", societe: "BASE ALAT - LE LUC", contact: "", adresse: "ROUTE EAALAT", cp: "83340", ville: "LE CANNET DES MAURES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0113", societe: "BASE ALAT GENERAL", contact: "", adresse: "SITES PHALSBOURG - ETAIN - DAX - LE LUC - SAILLAGOUSE", cp: ".", ville: ".", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0114", societe: "BASE ARIENNE 927 TOURS - CINQ MARS LA PILE", contact: "", adresse: "", cp: "37130", ville: "CINQ-MARS-LA-PILE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0115", societe: "BASE LOGISTIQUE INTERMARCHE", contact: "", adresse: "41 Route de Satolas et Bonce", cp: "38070", ville: "Saint-Quentin-Fallavier", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0116", societe: "BASE MILITAIRE BALLON DE SERVANCE SRSA CER", contact: "", adresse: "BALLON DE SERVANCE", cp: "70440", ville: "SERVANCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0117", societe: "BASES AERIENNES ET STATIONS HERTZIENNES SUD-OUEST", contact: "", adresse: "COGNAC / LACAUNE / MONT DE MARSAN / SAUVAGNAC", cp: "XX", ville: "XX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0118", societe: "BASES DE DEFENSE DE DRACHENBRONN - HAGUENAU - STRASBOURG (GENERAL)", contact: "", adresse: ".", cp: "67", ville: "DACHENBRONN - HAGUENAU - STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0119", societe: "BASF AGRI-PRODUCTION", contact: "", adresse: "21 CHEMIN DE LA SAUVEGARDE", cp: "69134", ville: "ECULLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0120", societe: "BASF - BEAUTY CARE", contact: "", adresse: "32 RUE SAINT JEAN DE DIEU", cp: "69007", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0121", societe: "BASF PERFORMANCE PRODUCTS FRANCE SAS", contact: "", adresse: "28 RUE DE LA CHAPELLE", cp: "68330", ville: "HUNINGUE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0122", societe: "BAT 040 BESANCON CUSENIER", contact: "", adresse: "5, AVENUE ELISEE CUSENIER", cp: "25000", ville: "BESANCON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0123", societe: "BAT 053 DIJON BERNANOS", contact: "", adresse: "5, RUE GEORGES BERNANOS", cp: "21000", ville: "DIJON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0124", societe: "BAT 054 DIJON DECOUVERTE", contact: "", adresse: "1, AVENUE DE LA DECOUVERTE", cp: "21000", ville: "DIJON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0125", societe: "BAT 057 ECULLY LYON IPS", contact: "", adresse: "1 CHEMIN JEAN MARIE VIANNEY", cp: "69130", ville: "ECULLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0126", societe: "BAT 066 ILLKIRCH EUCLIDE", contact: "", adresse: "RUE JEAN SAPIDUS", cp: "67400", ville: "ILLKIRCH GRAFFENSTADEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0127", societe: "BAT 069 WANTZENAU GOLF PASTEUR", contact: "", adresse: "2 RUE LOUIS PASTEUR", cp: "67610", ville: "LA WANTZENAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0128", societe: "BAT 071 LAVAL MELINE", contact: "", adresse: "46 RUE JULES MELINE", cp: "53000", ville: "LAVAL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0129", societe: "BAT 072 LAXOU CHAMP LE BOEUF", contact: "", adresse: "2 RUE DE LA VOLOGNE", cp: "54520", ville: "LAXOU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0130", societe: "BAT 089 MULHOUSE SINNE - AGENCE CIC", contact: "", adresse: "39 AVENUE CLEMENCEAU", cp: "68000", ville: "MULHOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0131", societe: "BAT 092 NANCY MAGINOT 4 - POIREL 7", contact: "", adresse: "4 PLACE ANDRE MAGINOT", cp: "54000", ville: "NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0132", societe: "BAT 11086 WACKEN B2", contact: "", adresse: "20 BOULEVARD DE DRESDE", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0133", societe: "BAT 11402 EIS WITTELSHEIM", contact: "", adresse: "3 RUE HOHMATTEN", cp: "68310", ville: "WITTELSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0134", societe: "BAT 11532 ACM BLVD HAUSSMANN", contact: "", adresse: "94 BOULEVARD HAUSSMANN", cp: "75008", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0135", societe: "BAT 128 SCHILTIGHEIM SCHILICK HEINEKEN", contact: "", adresse: "49 ROUTE DE BISCHWILLER", cp: "67300", ville: "SCHILTIGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0136", societe: "BAT 141 STRASBOURG SUD MEINAU EPS", contact: "", adresse: "30 RUE DU DOUBS", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0137", societe: "BAT 263 BEAUCOUZE ANGERS EP3C", contact: "", adresse: "2 B IMPASSE DU PAVILLON", cp: "49070", ville: "BEAUCOUZE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0138", societe: "BAT 265 DIJON CAMUS", contact: "", adresse: "24 AVENUE ALBERT CAMUS", cp: "21000", ville: "DIJON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0139", societe: "BAT 267 HOENHEIM URANIUM EDITIQUE", contact: "", adresse: "9 RUE DE L'URANIUM", cp: "67800", ville: "HOENHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0140", societe: "BAT 270 EURO TVS MARSEILLE TECHNOPOLE CHÂTEAU-GOMBERT", contact: "", adresse: "22 RUE JOHN MAYNARD KEYNES", cp: "13013", ville: "MARSEILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0141", societe: "BAT 278 TASSIN LA DEMI LUNE", contact: "SALIGNAT VICTOR victor.salignat@cmccs.fr", adresse: "63 CHEMIN ANTOINE PARDON", cp: "69160", ville: "TASSIN LA DEMI LUNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0142", societe: "BAT 281 VERRIERES LE BUISSON GATINES", contact: "", adresse: "167 ROUTE GATINES", cp: "91370", ville: "VERRIERES LE BUISSON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0143", societe: "BAT 295 LYON SIEGE CMSE RHIN ET DANUBE 8-10", contact: "", adresse: "8 RUE RHIN ET DANUBE", cp: "69009", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0144", societe: "BAT 300 PARIS PROVENCE SITE", contact: "", adresse: "6 AVENUE DE PROVENCE", cp: "75009", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0145", societe: "BAT 320 MULHOUSE SEGUIN EP3C", contact: "MR KRITTEL Sylvain - sylvain.kritel@cmccs.fr", adresse: "49 RUE MARC SEGUIN", cp: "68200", ville: "MULHOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0146", societe: "BAT 344 SAINT PRIEST MONOD - ETVS LYON", contact: "", adresse: "120 ALLEE JACQUES MONOD", cp: "69800", ville: "SAINT PRIEST", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0147", societe: "BAT 4081 STRASBOURG WACKEN CM SITE", contact: "Mr JOECKLE Lionel -lionel.joeckle@cmccs.fr", adresse: "34 RUE DU WACKEN", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0148", societe: "BAT 5087 MULHOUSE DUCRETET", contact: "", adresse: "24 RUE EUGENE DUCRETET", cp: "68200", ville: "MULHOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0149", societe: "BAT 5088 MULHOUSE LES CHEMINEES EIS", contact: "", adresse: "35 RUE EUGENE DUCRETET", cp: "68200", ville: "MULHOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0150", societe: "BAT 5769 ANGERS ESPACE LA TREILLE CF CMA", contact: "", adresse: "35 BD PIERRE DE COUBERTIN", cp: "49000", ville: "ANGERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0151", societe: "BAT 6152 STRASBOURG EXCEL PARC", contact: "", adresse: "2 A RUE BARTISCH", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0152", societe: "BAT 6771 FONTENAY 1", contact: "", adresse: "112, AVENUE DU MARECHAL DE TASSIGNY", cp: "94600", ville: "FONTENAY SOUS BOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0153", societe: "BAT 6778 ACM ORVAULT", contact: "", adresse: "1 ROND POINT DES ANTONS", cp: "44700", ville: "ORVAULT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0154", societe: "BAT 7238 STRASBOURG WACKEN CIC SITE", contact: "", adresse: "31 RUE JEAN WENGER VALENTIN", cp: "67958", ville: "STRASBOURG CEDEX 9", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0155", societe: "BAT 7788 MERLET1 ET BAT 7921 MERLET2 LA ROCHE SUR YON", contact: "", adresse: "34 RUE LEANDRE MERLET, BP 17", cp: "85001", ville: "LA ROCHE SUR YON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0156", societe: "BAT 8088 BISCHOFFSHEIM LE BISCHENBERG SITE", contact: "", adresse: "17 RUE RAIFFEISEN", cp: "67870", ville: "BISCHOFFSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0157", societe: "BAT 8253 LES ATELIERS DU LANDY ETVS", contact: "", adresse: "10 RUE WALDECK ROCHET", cp: "93300", ville: "AUBERVILLIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0158", societe: "BAT 8423 PARIS GAILLON SITE", contact: "", adresse: "6 RUE GAILLON", cp: "75002", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0159", societe: "BAT 8683 STRASBOURG LAWN", contact: "", adresse: "27 RUE JEAN WENGER VALENTIN", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0160", societe: "BAT 9004 METZ TECHNOPOLE", contact: "", adresse: "16 RUE PIERRE SIMON DE LAPLACE", cp: "57070", ville: "METZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0161", societe: "BATIMENT VIVALDI ISSY LES MOULINEAUX", contact: "", adresse: "X", cp: "92130", ville: "ISSY LES MOULINEAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0162", societe: "BBC CELLPACK PACKAGING", contact: "", adresse: "20 RUE BURNKIRCH", cp: "68720", ville: "ILLFURTH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0163", societe: "BEAUNE BRIOCHE", contact: "", adresse: "ROUTE DE VERDUN", cp: "21200", ville: "BEAUNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0164", societe: "BELLES FEUILLES / PARIS", contact: "", adresse: "63 Rue des Belles Feuilles", cp: "75116", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0165", societe: "BENVIC EUROPE", contact: "", adresse: "57 AVENUE DE TAVAUX", cp: "21800", ville: "CHEVIGNY SAINT SAUVEUR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0166", societe: "BERRY GLOBAL (AUVERGNE RHONE ALPES)", contact: "", adresse: "481 Avenue des Voirons", cp: "74800", ville: "La Roche-sur-Foron", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0167", societe: "BERRY SUPERFOS (ALSACE)", contact: "", adresse: "Zone Industrielle Bouxwiller, RUE D'OBERMODERN", cp: "67330", ville: "Bouxwiller", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0168", societe: "BERRY SUPERFOS BESANCON", contact: "", adresse: "11 RUE LAFAYETTE, CS 99401", cp: "25071", ville: "BESANCON CEDEX 9", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0169", societe: "BG SAS (BONGRAIN GERARD) - GROUPE SAVENCIA", contact: "", adresse: "", cp: "52150", ville: "ILLOUD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0170", societe: "BIBLIOTHEQUE UNIVERSITAIRE DE BELFORT", contact: "", adresse: "43, FAUBOURG DES ANCÊTRES, CS 40455", cp: "90008", ville: "BELFORT CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0171", societe: "BIEBER INDUSTRIE", contact: "", adresse: "40 RUE DU GENERAL LECLERC", cp: "67320", ville: "DRULINGEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0172", societe: "BIMA 83 (BIC)", contact: "Steyaert, Yannick <Yannick.Steyaert@bicworld.com>", adresse: "9 RUE DE L'INDUSTRIE, ZI EST, BP 80148", cp: "68701", ville: "CERNAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0173", societe: "BIOGAZ LORRAINE 54 HAGEVILLE", contact: "JEAN-PAUL MALTEMPI , jean-paul.maltempi@dalkia.fr, 06 29 79 17 11", adresse: "", cp: "54470", ville: "HAGEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0174", societe: "BIOLINE", contact: "", adresse: "IMPASSE DES 4 SAISONS", cp: "26250", ville: "LIVRON SUR DROME", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0175", societe: "BIOMERIEUX CRAPONNE", contact: "", adresse: "5 RUE DES ACQUEDUCS", cp: "69290", ville: "CRAPONNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0176", societe: "BIOMERIEUX GRENOBLE", contact: "", adresse: "5 RUE DES BERGES", cp: "38024", ville: "GRENOBLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0177", societe: "BIOMERIEUX LA BALME LES GROTTES", contact: "", adresse: "LOCAL 209", cp: "38390", ville: "LA BALME LES GROTTES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0178", societe: "BIOMERIEUX MARCY (SIEGE SOCIAL)", contact: "", adresse: "1380 ROUTE DE SAIN-BEL", cp: "69280", ville: "MARCY L'ETOILE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0179", societe: "BIOMERIEUX MARCY L'ETOILE", contact: "", adresse: "376 CHEMIN DE L'ORME", cp: "69280", ville: "MARCY L'ETOILE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0180", societe: "BIOMERIEUX SAINT VULBAS", contact: "", adresse: "AVENUE DE LA BERGERIE", cp: "01150", ville: "SAINT VULBAS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0181", societe: "BIOSPRINGER", contact: "Mr KELLER Philippe, p.keller@lesaffre.com , 03 88 40 54 54", adresse: "8 RUE DE SAINT-NAZAIRE", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0182", societe: "BLENEAU INDUSTRIE / 89220 BLENEAU", contact: "", adresse: "Rue des Vallées", cp: "89220", ville: "Bléneau", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0183", societe: "BLOOMBERG / PARIS 9", contact: "", adresse: "7 Rue Scribe", cp: "75009", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0184", societe: "BLUE PAPER", contact: "", adresse: "4 RUE CHARLES FRIEDEL, PORT DU RHIN - CS 30009", cp: "67017", ville: "STRASBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0185", societe: "BLUESTAR SILICONE", contact: "", adresse: "55 RUE FRERES PERRET", cp: "69191", ville: "SAINT -FONS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0186", societe: "BNF - Bibliothèque nationale de France François-Mitterand", contact: "", adresse: "FRANÇOIS-MITTERAND", cp: "75013", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0187", societe: "BOEHRINGER INGELHEIM", contact: "", adresse: "29 AVENUE TONY GARNIER", cp: "69007", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0188", societe: "BONDUELLE FRAIS FRANCE - SAINT MIHIEL", contact: "", adresse: "Route de Spada", cp: "55300", ville: "Maizey", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0189", societe: "BOREALIS PRODUIT ENGRAIS CHIMIQUE RHIN", contact: "", adresse: "ZONE INDUSTRIELLE", cp: "68490", ville: "OTTMARSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0190", societe: "BOSSARD FRANCE SAS", contact: "", adresse: "14 RUE DES TUILERIES", cp: "67457", ville: "MUNDOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0191", societe: "BOULANGERIE NEUHAUSER (Site de Fûrst 1)", contact: "", adresse: "Parc industriel FÜRST, SITE DE FURST 1, RUE ALEX DREUX", cp: "57730", ville: "FOLSCHVILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0192", societe: "BOULANGERIE NEUHAUSER (Site de Fûrst 2)", contact: "", adresse: "Parc industriel FÜRST, SITE DE FURST 2, RUE ALEX DREUX", cp: "57730", ville: "FOLSCHVILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0193", societe: "BOULANGERIE NEUHAUSER (SIEGE)", contact: "", adresse: "18 Avenue Foch", cp: "57730", ville: "Folschviller", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0194", societe: "BOUYGUES ENERGIES & SERVICES", contact: "", adresse: "130 RUE MARCEL HARTMANN", cp: "94200", ville: "IVRY SUR SEINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0195", societe: "BOUYGUES ENERGIES ET SERVICES FACILITY MANAGEMENT", contact: "", adresse: "7 RUE MAURICE ET LOUIS DE BROGLIE", cp: "90000", ville: "BELFORT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0196", societe: "BOUYGUES TELECOM HOENHEIM", contact: "", adresse: "31 Route de La Wantzenau", cp: "67800", ville: "Hœnheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0197", societe: "BRASSERIE CHAMPIGNEULLES", contact: "", adresse: "2 RUE GABRIEL BOUR", cp: "54250", ville: "CHAMPIGNEULLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0198", societe: "BRASSERIE HEINEKEN", contact: "", adresse: "RUE DU HOUBLON", cp: "59370", ville: "MONS EN BAROEUL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0199", societe: "BRASSERIE HEINEKEN ENTREPRISE S.A.S", contact: "", adresse: "4 RUE ST CHARLES", cp: "67300", ville: "SCHILTIGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0200", societe: "BRASSERIE METEOR", contact: "", adresse: "6 RUE DU GENERAL LEBOCQ", cp: "67270", ville: "HOCHFELDEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0201", societe: "BRENNTAG / 77", contact: "", adresse: "IMPASSE LAVOISIER", cp: "77220", ville: "TOURNAN EN BRIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0202", societe: "BRUNET BATAILLE", contact: "", adresse: "RUE JEAN PETIT", cp: "27110", ville: "CROSVILLE-LA-VIEILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0203", societe: "BRUNO SIEBERT SA", contact: "", adresse: "1 Rue Erlen", cp: "67120", ville: "Ergersheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0204", societe: "BUDELPACK", contact: "", adresse: "ZI BOIS L'ABESSE", cp: "68660", ville: "LIEPVRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0205", societe: "BUGATTI AUTOMOBILES", contact: "", adresse: "1 RUE SAINT JEAN", cp: "67120", ville: "MOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0206", societe: "BURGER INTERNATIONAL", contact: "", adresse: "ZI BOIS L'ABBESSE, BP 28", cp: "68660", ville: "LIEPVRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0207", societe: "BURKERT FRANCE SAS", contact: "", adresse: "20 RUE DU GIESSEN", cp: "67220", ville: "TRIEMBACH AU VAL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0208", societe: "C&K COMPONENTS", contact: "", adresse: "1 RUE CLAUDE BERTHOLLET", cp: "39100", ville: "DOLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0209", societe: "C2 BERNARD / PARIS 19", contact: "", adresse: "126 Boulevard MacDonald", cp: "75019", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0210", societe: "CA VAL D'YERRES VAL DE SEINE (COMMUNAUTÉ D'AGGLOMÉRATION)", contact: "BAUBY Stéphane, sbauby@vyvs.fr", adresse: "DIRECTION FINANCIERE, BP 103", cp: "91805", ville: "BRUNOY CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0211", societe: "CABLERIES LAPP SARL", contact: "", adresse: "TECHNOPOLE DE FORBACH SUD,, RUE AVOGADRO", cp: "57602", ville: "FORBACH CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0212", societe: "CAISSE AUTONOME NATIONALE DE LA SECURITE SOCIALES DANS LES MINES", contact: "", adresse: "77 AVENUE DE SEGUR", cp: "75714", ville: "PARIS CEDEX 15", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0213", societe: "CAISSE REGIONALE CREDIT MUTUEL", contact: "", adresse: "35 BD PIERRE DE COUBERTIN", cp: "49000", ville: "ANGERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0214", societe: "CALOR PONT EVEQUE", contact: "", adresse: "ZI DE MONPLAISIR", cp: "38780", ville: "PONT EVEQUE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0215", societe: "CAMPING CAPFUN PALAIS DE GAUFRETTE", contact: "", adresse: "33 RUE DE L'ETANG", cp: "57510", ville: "REMERING LES PUTTELANGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0216", societe: "CANAL + OPTIMA / PUTEAUX", contact: "", adresse: "6 RUE GODEFROY", cp: "92800", ville: "PUTEAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0217", societe: "CANDIA PARIS", contact: "", adresse: "216 Rue Raymond Losserand", cp: "75014", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0218", societe: "CAP INGELEC (AGENCE DE PARIS EST)", contact: "", adresse: "IMMEUBLE C2", cp: "77420", ville: "CHAMPS SUR MARNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0219", societe: "CAP INGELEC / ST JEAN D'ILLAC", contact: "", adresse: "47 Allée des Palanques", cp: "33127", ville: "Saint-Jean-d’Illac", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0220", societe: "CARAMBAR & CO", contact: "", adresse: "Zone industriel Ravennes les Francs", cp: "59588", ville: "Bondues", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0221", societe: "CARRE PLAZA - BNP PARIBAS REAL ESTATE / BOBIGNY", contact: "", adresse: "15 PROMENADE JEAN ROSTAND", cp: "93022", ville: "BOBIGNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0222", societe: "CARRIERE SCRE / REDING", contact: "", adresse: "CARRIERE SCRE", cp: "57445", ville: "REDING", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0223", societe: "CARTIER JOAILLERIE INTERNATIONAL", contact: "", adresse: "186 Rue Louis-Victor de Broglie", cp: "51430", ville: "Bezannes", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0224", societe: "CASINO D'AMNEVILLE", contact: "", adresse: "CENTRE DE LOISIR ET THERMAL, PARC DE COULANGE", cp: "57360", ville: "AMNEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0225", societe: "CASINO DE CONTREXEVILLE", contact: "", adresse: "PARC THERMAL", cp: "88140", ville: "CONTREXEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0226", societe: "CASINO JOA / SAINT PAIR SUR MER", contact: "", adresse: "2 rue de la Plage", cp: "50380", ville: "SAINT PAIR SUR MER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0227", societe: "CASINO JOA / ST AUBIN SUR MER", contact: "", adresse: "128 Rue Pasteur", cp: "14750", ville: "SAINT AUBIN SUR MER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0228", societe: "CASTMETAL (25260 COLOMBIER FONTAINE)", contact: "", adresse: "2 RUE DOUBS", cp: "25260", ville: "COLOMBIER FONTAINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0229", societe: "CASTMETAL SAINTE SUZANNE", contact: "", adresse: "RUE DE BESANCON", cp: "25630", ville: "SAINTE SUZANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0230", societe: "CAVE COOP VINICOLE D'INGERSHEIM (JEAN GEILER)", contact: "", adresse: "45 RUE DE LA REPUBLIQUE", cp: "68040", ville: "INGERSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0231", societe: "CAVE DU ROI DAGOBERT", contact: "", adresse: "RUE DU SCHARRACH", cp: "67310", ville: "TRAENHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0232", societe: "CBRE GLOBAL WORKPLACE SOLUTIONS", contact: "", adresse: "134 RUE DANTON", cp: "92300", ville: "LEVALLOIS PERRET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0233", societe: "CCI SEINE ET MARNE", contact: "", adresse: "1 RUE JOHANNES GUTENBERG", cp: "77716", ville: "SERRIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0234", societe: "CCI SEINE ET MARNE - SITE EMERAINVILLE", contact: "", adresse: "UTEC", cp: "77184", ville: "EMERAINVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0235", societe: "CCS SERVICES - STRASBOURG WACKEN", contact: "", adresse: "4 Rue Frédéric-Guillaume Raiffeisen", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0236", societe: "CEDEP FONTAINEBLEAU (CENTRE FORMATION)", contact: "", adresse: "Boulevard de Constance", cp: "77300", ville: "Fontainebleau", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0237", societe: "CEFA", contact: "", adresse: "1 ROUTE DE WOERTH", cp: "67250", ville: "SOULTZ SOUS FORETS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0238", societe: "CEGELEC ALSACE SUD", contact: "", adresse: "1 Rue des Vosges, CS 70012", cp: "68350", ville: "Didenheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0239", societe: "CEGELEC METZ - (GROUPE VINCI)", contact: "", adresse: "4 RUE DE LA FONTAINE CHAUDRON", cp: "57280", ville: "NORROY-LE-VENEUR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0240", societe: "CEGELEC MISSENARD ( EX VINCI-FACILITIES CHOISY)", contact: "", adresse: "IMMEUBLE ORIX, CS 10294", cp: "94607", ville: "CHOISY LE ROI", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0241", societe: "CEGELEC MISSENARD VINCI FACILITIES", contact: "", adresse: "67 AVENUE DE FONTAINEBLEAU", cp: "94276", ville: "LE KREMLIN-BICETRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0242", societe: "CEGELEC VOSGES AGENCE DE VITTEL", contact: "", adresse: "AGENCE DE VITTEL, 182, RUE DE LA VOIVRE, ZI DE LA CROISETTE", cp: "88800", ville: "VITTEL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0243", societe: "CELINE", contact: "", adresse: "16 RUE VIVIENNE", cp: "75002", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0244", societe: "CEMOI CONFISEUR", contact: "", adresse: "79 Rue de Saverne", cp: "67120", ville: "Molsheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0245", societe: "CENPA", contact: "", adresse: "5 RUE DE LA GARE", cp: "67590", ville: "SCHWEIGHOUSE SUR MODER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0246", societe: "CENTER PARCS - DOMAINE DES TROIS FORETS", contact: "", adresse: "RUE DE BERTRAMBOIS", cp: "57790", ville: "HATTIGNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0247", societe: "CENTRALE BIOMASSE DE STRASBOURG", contact: "", adresse: "81 RUE DU RHIN NAPOLEON", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0248", societe: "CENTRALE DE COGENERATION DE SARRE-UNION", contact: "", adresse: "", cp: "67260", ville: "SARRE-UNION", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0249", societe: "CENTRALE HYDRAULIQUE DU HAMMER", contact: "", adresse: "RUE DU HAMMER", cp: "68140", ville: "MUNSTER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0250", societe: "CENTRALE MC2 / ARC LES GRAY", contact: "", adresse: "24 Rue des Giranaux", cp: "70100", ville: "Arc-lès-Gray", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0251", societe: "CENTRALE MC2 / THISE", contact: "", adresse: "15 Chemin de l'ermitage", cp: "25000", ville: "Besançon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0252", societe: "CENTRE AMBULATOIRE KLEBER", contact: "", adresse: "51, RUE DE SEZE", cp: "69006", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0253", societe: "CENTRE COMMERCIAL BEL AIR / RAMBOUILLET", contact: "", adresse: "N10", cp: "78120", ville: "RAMBOUILLET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0254", societe: "CENTRE COMMERCIAL BOISSENART", contact: "", adresse: "ROUTE DEPARTEMENTALE 306", cp: "77240", ville: "CESSON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0255", societe: "CENTRE COMMERCIAL CONFLUENCE LYON", contact: "", adresse: "112 COURS CHARLEMAGNE", cp: "69002", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0256", societe: "CENTRE COMMERCIAL COTE SEINE", contact: "", adresse: "50 Avenue du Maréchal Foch", cp: "95100", ville: "Argenteuil", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0257", societe: "CENTRE COMMERCIAL DES HALLES", contact: "", adresse: "24 PLACE DES HALLES", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0258", societe: "CENTRE COMMERCIAL LA VILLE DU BOIS 91", contact: "", adresse: "5 RUE DE LA CROIX SAINT-JACQUES", cp: "91620", ville: "LA VILLE DU BOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0259", societe: "CENTRE COMMERCIAL PARLY 2", contact: "", adresse: "2, AVENUE DU GENERAL DE GAULLE", cp: "78158", ville: "LE CHESNAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0260", societe: "CENTRE COMMERCIAL SAINT QUENTIN EN YVELINE", contact: "", adresse: "ST QUENTIN EN YVELINE", cp: "78000", ville: "SAINT QUENTIN EN YVELINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0261", societe: "CENTRE COMMERCIAL SO OUEST", contact: "", adresse: "31 RUE D'ALSACE", cp: "92300", ville: "LEVALLOIS-PERRET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0262", societe: "CENTRE COMMERCIAL VELIZY 2", contact: "", adresse: "RN118", cp: "78140", ville: "VELIZY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0263", societe: "CENTRE DE CALCUL DE L'IN2P3 - CNRS", contact: "", adresse: "21 Avenue Pierre de Coubertin", cp: "69100", ville: "Villeurbanne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0264", societe: "CENTRE DE HARTOUSE", contact: "", adresse: "2 ALLEE DES PEINTRES", cp: "67500", ville: "HAGUENAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0265", societe: "CENTRE DE RECHERCHE INRIA NANCY - GRAND EST", contact: "", adresse: "615 RUE DU JARDIN BOTANIQUE", cp: "54600", ville: "VILLERS LES NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0266", societe: "CENTRE DE RETENTION ADMINISTRATIVE / LYON", contact: "", adresse: "120 RUE DU ROYAUME UNI, BP 106", cp: "69125", ville: "ST EXUPERY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0267", societe: "CENTRE DEPARTEMENTAL DE REPOS ET DE SOIN", contact: "", adresse: "40 RUE DU STAUFFEN, BP 70468", cp: "68020", ville: "COLMAR CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0268", societe: "CENTRE FUNERAIRE DE STRASBOURG", contact: "", adresse: "15 RUE DE L'ILL", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0269", societe: "CENTRE GEORGES POMPIDOU", contact: "", adresse: "PLACE GEORGES POMPIDOU", cp: "75004", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0270", societe: "CENTRE HOSPITALIER AUXERRE", contact: "", adresse: "2 BOULEVARD DE VERDUN", cp: "89011", ville: "AUXERRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0271", societe: "CENTRE HOSPITALIER BOULAY", contact: "", adresse: "1 RUE DE L'HOPITAL", cp: "57220", ville: "BOULAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0272", societe: "CENTRE HOSPITALIER DE CHAUMONT", contact: "", adresse: "2 Rue Jeanne d'Arc", cp: "52000", ville: "Chaumont", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0273", societe: "CENTRE HOSPITALIER DE JURY", contact: "", adresse: "ROUTE DE ARS", cp: "57245", ville: "JURY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0274", societe: "CENTRE HOSPITALIER DE LORQUIN", contact: "", adresse: "5 RUE GENERAL DE GAULLE, MAGASIN CENTRAL", cp: "57790", ville: "LORQUIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0275", societe: "CENTRE HOSPITALIER DE ROANNE", contact: "", adresse: "28, RUE DE CHARLIEU", cp: "42328", ville: "ROANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0276", societe: "CENTRE HOSPITALIER DE ROUBAIX", contact: "", adresse: "35 RUE DE BARBIEUX", cp: "59100", ville: "ROUBAIX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0277", societe: "CENTRE HOSPITALIER DE ROUFFACH", contact: "", adresse: "27 RUE DU 4EME RSM", cp: "68250", ville: "ROUFFACH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0278", societe: "CENTRE HOSPITALIER JURA SUD", contact: "", adresse: "55 Rue du Docteur Jean Michel", cp: "39000", ville: "Lons-le-Saunier", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0279", societe: "CENTRE HOSPITALIER METROPOLE SAVOIE", contact: "", adresse: "Place Lucien Biset", cp: "73011", ville: "Chambéry CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0280", societe: "CENTRE HOSPITALIER MODANE", contact: "", adresse: "335 Rue du Pré Soleil", cp: "73500", ville: "Modane", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0281", societe: "CENTRE INTERNATIONAL DE LA RECHERCHE SUR LE CANCER (CIRC)", contact: "", adresse: "150 COURS ALBERT THOMAS", cp: "69008", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0282", societe: "CENTRE LECLERC SARREBOURG", contact: "", adresse: "19 RUE DE LUNEVILLE", cp: "57400", ville: "SARREBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0283", societe: "CENTRE LECLERC WASSELONNE", contact: "", adresse: "RUE DE HOHENGOEFT", cp: "67310", ville: "WASSELONNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0284", societe: "CENTRE NAUTIQUE L'O / OBERNAI", contact: "", adresse: "6 RUE DU MARÉCHAL DE LATTRE DE TASSIGNY", cp: "67210", ville: "OBERNAI", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0285", societe: "CENTRE NAUTIQUE OCEANIDE", contact: "", adresse: "", cp: "67700", ville: "SAVERNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0286", societe: "CENTRE ORTHOPÉDIQUE MÉDICO-CHIRURGICAL", contact: "", adresse: "2 Rue du Pressoir", cp: "71640", ville: "Dracy-le-Fort", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0287", societe: "CENTRE SAINT JACQUES METZ", contact: "", adresse: "PLACE DE LA MAISON DES TETES", cp: "57040", ville: "METZ CEDEX 01", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0288", societe: "CENTRE VIANDES BEAUVALLET FILS", contact: "", adresse: "ZI Rue Raoul Follereau", cp: "45300", ville: "Pithiviers", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0289", societe: "CEREAL PARTNERS NESTLE", contact: "", adresse: "5 RUE DU MONT-BLANC", cp: "74150", ville: "RUMILLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0290", societe: "CETIM", contact: "", adresse: "52 AVENUE FELIX LOUAT", cp: "60304", ville: "SENLIS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0291", societe: "CFCM (PAYEUR CM-CIC SERVICES)", contact: "", adresse: "4 Rue Frédéric-Guillaume Raiffeisen", cp: "67000", ville: "Strasbourg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0292", societe: "CFCMO (PAYEUR CCS)", contact: "", adresse: "34 RUE LEANDRE MERLET, BP 17", cp: "85001", ville: "LA ROCHE SUR YON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0293", societe: "CGM INSPECTION", contact: "", adresse: "LES TERRASSE DE LA SARRE 2, TERRASSE BRETAGNE", cp: "57400", ville: "SARREBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0294", societe: "CGP COATING", contact: "", adresse: "4 ROUTE DE LA THEROUANNE", cp: "18110", ville: "SAINT GEORGES SUR MOULON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0295", societe: "CH DE GIVORS", contact: "", adresse: "9 AVENUE PROFESSEUR FLEMMING", cp: "69700", ville: "GIVORS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0296", societe: "CH JEAN BOUVERI", contact: "", adresse: "LDT GALUZOT,", cp: "71230", ville: "VALLIÈRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0297", societe: "CH LANGRES", contact: "", adresse: "10 Rue de la Charité", cp: "52200", ville: "Langres", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0298", societe: "CH REINE HORTENSE", contact: "", adresse: "CENTRE HOSPITALIER METROPOLE SAVOIE, 1 BOULEVARD BERTHOLLET", cp: "73100", ville: "AIX LES BAINS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0299", societe: "CHALETS DES GRANDES COMBES COURCHEVEL", contact: "", adresse: "COURCHEVEL", cp: "73120", ville: "COURCHEVEL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0300", societe: "CHANEL", contact: "", adresse: "24 RUE LATÉRAL DU CHEMIN DE FER", cp: "93500", ville: "PANTIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0301", societe: "CHANEL / PARIS", contact: "", adresse: "12 Rue Duphot", cp: "75001", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0302", societe: "CHARAL", contact: "", adresse: "RUE DU TROU AUX SERPENTS", cp: "57050", ville: "METZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0303", societe: "CHARCUTERIE DU VAL D'ARGENT", contact: "", adresse: "Rue du Giessen", cp: "67750", ville: "Scherwiller", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0304", societe: "CHATEAU DE VERSAILLES", contact: "", adresse: "2 RUE DE L'INDEPENDANCE AMERICAINE", cp: "78000", ville: "VERSAILLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0305", societe: "CHAUDRONNERIE DU RIED", contact: "", adresse: "23 RUE DE SCHOENAU", cp: "67390", ville: "SAASENHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0306", societe: "CHAUFFERIE DES BRUYERES", contact: "", adresse: "1 ALLEE AMPERE", cp: "71000", ville: "MACON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0307", societe: "CHAUFFERIE DU RIED", contact: "", adresse: "RUE SARCELLES", cp: "67300", ville: "SCHILTIGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0308", societe: "CHAUFFERIE ECO 2 DU WACKEN", contact: "", adresse: "1 RUE FRITZ KIEFFER", cp: "67000", ville: "Strasbourg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0309", societe: "CHAUFFERIE ECO-QUARTIER ADELSHOFFEN", contact: "", adresse: "110 Route de Bischwiller", cp: "67300", ville: "Schiltigheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0310", societe: "CHAUFFERIE QUARTIER DES TANNERIES / LINGOLSHEIM", contact: "", adresse: "RUE MARIA CALLAS", cp: "67380", ville: "LINGOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0311", societe: "CHÊNE DE MEUSE", contact: "", adresse: "9 Chemin de l'huis colas", cp: "55800", ville: "Mognéville", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0312", societe: "CHLORIDE", contact: "", adresse: "30 AVENUE MONTGOLFIER", cp: "69684", ville: "CHASSIEU CEDEX FRANCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0313", societe: "CHOCOLATERIE ABTEY", contact: "", adresse: "ZONE ARTISANALE RN 466, 4 RUE DE LA FORET", cp: "68990", ville: "HEIMSBRUNN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0314", societe: "CHRISTIAN DIOR PARFUM / GROUPE LVMH", contact: "", adresse: "190/192 Avenue Charles de Gaulle", cp: "92200", ville: "Neuilly-sur-Seine", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0315", societe: "CHU DE GRENOBLE", contact: "", adresse: "DIRECTION DES SERVICES TECHNIQUES", cp: "38043", ville: "GRENOBLE CEDEX 9", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0316", societe: "CHU NANCY", contact: "Christian MAROTEL, 06 98 64 95 00 - 03 83 18 40 34 , christian.marotel@engie.com", adresse: "5 RUE DU MORVAN, BATIMENT PHILIPPE CANTON", cp: "54500", ville: "VANDOEUVRE LES NANCY", email: "", telephone: "03.83.15.70.47" },
-  { id: uid(), code: "CLI-0317", societe: "CIA (CONTROLE INSTRUMENTATION AUTOMATISMES)", contact: "", adresse: "151 SENTE DE LA GILLOTTE", cp: "77610", ville: "LA HOUSSAYE EN BRIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0318", societe: "CIC AGENCE COLMAR", contact: "", adresse: "35 A RUE DES CLEFS", cp: "68000", ville: "COLMAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0319", societe: "CIC EST HAGUENAU", contact: "", adresse: "Rue du Maire André Traband", cp: "67500", ville: "Haguenau", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0320", societe: "CIC EST NANCY", contact: "", adresse: "4 PLACE ANDRE MAGINOT", cp: "54000", ville: "NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0321", societe: "CIC GAILLON (PAYEUR CM-CIC SERVICES)", contact: "", adresse: "6 RUE GAILLON", cp: "75002", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0322", societe: "CIC PROVENCE (PAYEUR CM-CIC SERVICES)", contact: "", adresse: "6 AVENUE DE PROVENCE", cp: "75009", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0323", societe: "CIRA (GROUPE RICCOBONO)", contact: "", adresse: "580, ALLÉE DES CYPRÈS", cp: "01150", ville: "Saint-Vulbas", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0324", societe: "CIRA SAINT VULBAS (GROUPE RICCOBONO)", contact: "", adresse: "ZI DE LA PLAINE DE L'AIN", cp: "01150", ville: "SAINT VULBAS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0325", societe: "CITE ADMINISTRATIVE COLMAR", contact: "", adresse: "1 Rue Fleischhauer", cp: "68000", ville: "Colmar", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0326", societe: "CITE DE L'ARCHITECTURE ET DU PATRIMOINE", contact: "", adresse: "1 PLACE DU TROCADERO ET DU 11 NOVEMBRE", cp: "75016", ville: "75016 PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0327", societe: "CITE PARC GLUCK", contact: "", adresse: "RUE LAVOISIER", cp: "68200", ville: "MULHOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0328", societe: "CLARINS", contact: "", adresse: "5 RUE AMPÈRE", cp: "95300", ville: "PONTOISE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0329", societe: "CLAUSER", contact: "", adresse: "Rue de l'aven, ZI PONT A ROSEAUX, PORTS N°4363", cp: "59279", ville: "Loon-Plage", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0330", societe: "CLEMESSY - AGENCE DE STRASBOURG", contact: "", adresse: "4 Rue du Héron", cp: "67300", ville: "Schiltigheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0331", societe: "CLEMESSY AÉRORAUTIQUE SPATIAL ET TRANSPORT", contact: "", adresse: "18 RUE DE THANN", cp: "68057", ville: "MULHOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0332", societe: "CLEMESSY COLMAR", contact: "", adresse: "ZI NORD, 5 RUE LAVOISIER", cp: "68027", ville: "COLMAR CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0333", societe: "CLEMESSY DIJON", contact: "", adresse: "12 RUE DE LA REDOUTE", cp: "21850", ville: "SAINT-APOLLINAIRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0334", societe: "CLEMESSY MEYZIEU", contact: "", adresse: "10 BOULEVARD MARCEL DASSAULT", cp: "69330", ville: "JONAGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0335", societe: "CLEMESSY SIEGE USINE C3", contact: "", adresse: "18 RUE DE THANN", cp: "68057", ville: "MULHOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0336", societe: "CLEMESSY USINE C2 (AGENCE DE MULHOUSE)", contact: "", adresse: "9 RUE DE SAINT AMARIN, BP 2499", cp: "68200", ville: "MULHOUSE CEDEX 2", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0337", societe: "CLIFFORD / PARIS 8", contact: "", adresse: "4 Place des Saussaies", cp: "75008", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0338", societe: "CLINIQUE DE LA MIOTTE", contact: "", adresse: "15 AVENUE DE LA MIOTTE", cp: "90002", ville: "BELFORT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0339", societe: "CLINIQUE DU PARC LYON", contact: "", adresse: "155 BOULEVARD STALINGRAD", cp: "69006", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0340", societe: "CLINIQUE DU RENAISON", contact: "", adresse: "75, RUE GENERAL GIRAUD", cp: "42308", ville: "ROANNE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0341", societe: "CLINIQUE IRIGNY", contact: "", adresse: "5 AVENUE DE VERDUN", cp: "69540", ville: "IRIGNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0342", societe: "CLSI EURL", contact: "", adresse: "10 ALLÉE DES LILAS", cp: "68680", ville: "KEMBS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0343", societe: "CLUB MED LES ARC", contact: "", adresse: "LES ARC 1600", cp: "73700", ville: "BOURG SAINT MAURICE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0344", societe: "CM-CIC SERVICES - VERLINGHEM", contact: "", adresse: "36 RUE DE MESSINES", cp: "59237", ville: "VERLINGHEM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0345", societe: "CNFPT ISSY LES MOULINEAUX", contact: "", adresse: "165 RUE JEAN JACQUES ROUSSEAU", cp: "92130", ville: "ISSY LES MOULINEAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0346", societe: "COANUS", contact: "", adresse: "6 RUE DE LORRAINE", cp: "88150", ville: "IGNEY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0347", societe: "COFELY AGENCE DE METZ - WOIPPY", contact: "", adresse: "3 RUE DE LA BAILLONVILLE", cp: "57147", ville: "WOIPPY CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0348", societe: "COFELY AGENCE NANCY-HEILLECOURT (DEPARTEMENT INSTALLATION)", contact: "", adresse: "ZI HEILLECOURT OUEST", cp: "54180", ville: "HEILLECOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0349", societe: "COFELY AXIMA BRY SUR MARNE", contact: "", adresse: "33 RUE DES CLOTAIS", cp: "94364", ville: "BRY SUR MARNE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0350", societe: "COFELY CHEZ NOVACARB", contact: "", adresse: "34 RUE GILBERT BIZE", cp: "54410", ville: "LANEUVEVILLE DEVANT NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0351", societe: "COFELY COGENERATION DE SOLVAY", contact: "", adresse: "USINE SOLVAY, RUE CARNOT PROLONGEE", cp: "54770", ville: "VARANGEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0352", societe: "COFELY COGENERATION DE TOUL", contact: "", adresse: "RUE BOIS LA VILLE, ZI CROIX LA METZ", cp: "54200", ville: "TOUL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0353", societe: "COFELY COGENERATION SALIN DU MIDI ET SALINE DE L'EST", contact: "", adresse: "AGENCE NORD EST, 17 RUE GABRIEL PERI", cp: "54110", ville: "VARANGEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0354", societe: "COFELY SERVICES DIRECTION IDF TERTIAIRE", contact: "", adresse: "23 AVENUE JULES RIMET", cp: "93210", ville: "SAINT DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0355", societe: "COGE CTM/ AMIENS", contact: "", adresse: "43 Rue Alexandre Dumas", cp: "80090", ville: "Amiens", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0356", societe: "COGENERATION / LANGRES", contact: "", adresse: "Avenue du 21ème Régiment d'Infanterie", cp: "52200", ville: "Langres", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0357", societe: "COGENERATION ARLANXEO", contact: "", adresse: "7 RUE DU RIED", cp: "67610", ville: "LA WANTZENAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0358", societe: "COGENT COMMUNICATIONS FRANCE SAS", contact: "", adresse: "46 Route de Bischwiller", cp: "67300", ville: "Schiltigheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0359", societe: "COGNAC FORMATION AERO", contact: "", adresse: "BASE AERIENNE", cp: "16100", ville: "CHATEAUBERNARD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0360", societe: "COGNIZANT GRENOBLE", contact: "", adresse: "3 AVENUE DOYEN LOUIS WEIL", cp: "38000", ville: "GRENOBLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0361", societe: "COGNIZANT LYON", contact: "", adresse: "40 QUAI RIMBAUD", cp: "69002", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0362", societe: "COLIN", contact: "", adresse: "ZONE ARTISANALE", cp: "67170", ville: "WINGERSHEIM-LES-QUATRE-BANS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0363", societe: "COLLEGE DE FRANCE", contact: "", adresse: "11 Place Marcelin Berthelot", cp: "75005", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0364", societe: "COLMARIENNE D'ELECTRICITE ET DE MAINTENANCE", contact: "", adresse: "11 RUE ANDRE KIENER, ZI NORD", cp: "68000", ville: "COLMAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0365", societe: "COMBRONDE LOGISTIQUE", contact: "", adresse: "25 Avenue Henri Dunant", cp: "30300", ville: "Beaucaire", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0366", societe: "COMECA", contact: "", adresse: "ROUTE DE GIVRY", cp: "71325", ville: "CHATENOY LE ROYAL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0367", societe: "COMMISSARIAT ENERGIE ATOMIQUE / SACLAY", contact: "", adresse: "CEA SACLAY", cp: "91191", ville: "GIF SUR YVETTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0368", societe: "COMMUNAUTE DE COMMUNES DE SELESTAT", contact: "", adresse: "1 Rue Louis Lang", cp: "67600", ville: "Sélestat", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0369", societe: "COMPAGNIE DE CHAUFFAGE (CCIAG)", contact: "", adresse: "LE POLYNÔME, CS 72606", cp: "38036", ville: "GRENOBLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0370", societe: "COMPAGNIE DES ALPES", contact: "", adresse: "137 RUE FRANCOIS GUISE", cp: "73000", ville: "CHAMBERY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0371", societe: "COMPAGNIE DES CRISTALLERIES DE SAINT LOUIS (HERMES)", contact: "", adresse: "RUE COETLOSQUET", cp: "57620", ville: "ST LOUIS LES BITCHE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0372", societe: "COMPTOIR ELECTRIQUE", contact: "", adresse: "ZONE ARIANE BUHL, BP 50103", cp: "57403", ville: "SARREBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0373", societe: "COM'UNITY", contact: "", adresse: "1 RUE EMILE ZOLA", cp: "95870", ville: "BEZONS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0374", societe: "CONSEIL DE L'EUROPE", contact: "", adresse: "ALLÉE DES DROITS DE L'HOMME", cp: "STRASBOURG", ville: "67000", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0375", societe: "CONSTRUCTIONS ELECTRIQUES DE BEAUCOURT - NIDEC (LEROY-SOMER)", contact: "", adresse: "14 RUE DE DAMPIERRE", cp: "90500", ville: "BEAUCOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0376", societe: "COOPERATIVE AGRICOLE DE CEREALES", contact: "", adresse: "D52 - ZONE PORTUAIRE", cp: "68490", ville: "OTTMARSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0377", societe: "CORA ANDELNANS (BELFORT)", contact: "", adresse: "ROUTE DE MONTBELLIARD", cp: "90400", ville: "ANDELNANS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0378", societe: "CORA DIRECTION TECHNIQUE & MAINTENANCE", contact: "", adresse: "1 RUE DU CHENIL, CS 30175 CROISSY BEAUBOURG", cp: "77435", ville: "MARNE-LA-VALLEE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0379", societe: "CORA DÔLE CHOISEY", contact: "", adresse: "7 A ROUTE NATIONALE 73", cp: "39100", ville: "CHOISEY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0380", societe: "CORA DORLISHEIM", contact: "", adresse: "1 RUE MERCURE", cp: "67120", ville: "DORLISHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0381", societe: "CORA HAGUENAU", contact: "", adresse: "Route du Rhin", cp: "67500", ville: "Haguenau", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0382", societe: "CORA HOUSSEN", contact: "", adresse: "ZONE COMMERCIALE DU BUHLFELD HOUSSEN", cp: "68019", ville: "COLMAR CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0383", societe: "CORA LUNEVILLE", contact: "", adresse: "31 D590", cp: "54300", ville: "Moncel-lès-Lunéville", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0384", societe: "CORA MONTBELIARD", contact: "", adresse: "ROUTE DE BETHONCOURT", cp: "25200", ville: "MONTBELIARD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0385", societe: "CORA MUNDOLSHEIM", contact: "", adresse: "ROUTE NATIONALE 63", cp: "67450", ville: "MUNDOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0386", societe: "CORA SARREBOURG", contact: "", adresse: "ROUTE DE PHALSBOURG, BP 60240", cp: "57402", ville: "SARREBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0387", societe: "CORA VESOUL", contact: "", adresse: "BOULEVARD KENNEDY", cp: "70000", ville: "VESOUL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0388", societe: "CORA WITTENHEIM", contact: "", adresse: "130 ROUTE DE SOULTZ", cp: "68271", ville: "WITTENHEIM CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0389", societe: "CORDENPHARMA", contact: "", adresse: "47 RUE DE LONGVIC", cp: "21300", ville: "CHENOVE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0390", societe: "CORDON CMS", contact: "", adresse: "", cp: "68153", ville: "RIBEAUVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0391", societe: "CORICO", contact: "", adresse: "92 ROUTE DE LA MATREILLE", cp: "69860", ville: "DEUX GROSNES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0392", societe: "CORPLEX FRANCE KAYSERSBERG", contact: "", adresse: "75 Route de Lapoutroie", cp: "68240", ville: "Kaysersberg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0393", societe: "COTE SAS", contact: "", adresse: "6 Rue de Champagnole", cp: "38370", ville: "Les Roches-de-Condrieu", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0394", societe: "COVALYS (- EX CVE ANTARES)", contact: "", adresse: "ROCADE DE LA VALLEE DE LA LYS, BP 302", cp: "59433", ville: "HALLUIN CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0395", societe: "COVED ENVIRONNEMENT", contact: "", adresse: "51 RUE DE LA PAIX", cp: "68120", ville: "RICHWILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0396", societe: "CPAM CREST", contact: "", adresse: "COURS JOUBERNON", cp: "26400", ville: "CREST", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0397", societe: "CPAM PIERRELATTE", contact: "", adresse: "BOULEVARD PIERRE ET MARIE CURIE", cp: "26700", ville: "PIERRELATTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0398", societe: "CPAM ROMANS-SUR-ISERE", contact: "", adresse: "24 Côte des Cordeliers", cp: "26100", ville: "Romans-sur-Isère", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0399", societe: "CPAM SAINT-VALLIER", contact: "", adresse: "RUE ANATOLE FRANCE", cp: "26240", ville: "SAINT-VALLIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0400", societe: "CPAM VALENCE (DROME)", contact: "", adresse: "6 AVENUE PRESIDENT HERRIOT", cp: "26024", ville: "VALENCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0401", societe: "CPAM VALENCE SIEGE", contact: "", adresse: "AVENUE DU PRESIDENT E. HERRIOT", cp: "26000", ville: "VALENCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0402", societe: "CREDIT AGRICOLE - 73 LA MOTTE", contact: "", adresse: "1220 AVENUE COSTA DE BEAUREGARD", cp: "7329", ville: "LA MOTTE SERVOLEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0403", societe: "CRISTAL ECO VALO (EX SUEZ RV ENERGIE IDF NORD-EST)", contact: "", adresse: "2 RUE DE L'UNION", cp: "78420", ville: "CARRIERES SUR SEINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0404", societe: "CRISTAL FRANCE SAS", contact: "", adresse: "95 RUE DU GENERAL DE GAULLE", cp: "68800", ville: "THANN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0405", societe: "CROIX ROUGE CHALON SUR SAONE", contact: "", adresse: "13 Rue Claude Perry", cp: "71100", ville: "Chalon-sur-Saône", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0406", societe: "CROUZET AUTOMATISMES", contact: "", adresse: "12 RUE JEAN JULLIEN DAVIN", cp: "26000", ville: "VALENCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0407", societe: "CRPF COS NANTEAU SUR LUNAIN", contact: "", adresse: "BP 34", cp: "77710", ville: "NANTEAU SUR LUNAIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0408", societe: "CRYOSTAR SAS", contact: "", adresse: "ZONE INDUSTRIELLE", cp: "68220", ville: "HESINGUE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0409", societe: "CS GROUP- FRANCE (EX CS SI)", contact: "", adresse: "22 AVENUE DE GALILEE", cp: "92350", ville: "LE PLESSIS ROBINSON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0410", societe: "CSP TECHNOLOGIES", contact: "", adresse: "9 RUE DU SANDHOLZ", cp: "67110", ville: "Niederbronn-les-Bains", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0411", societe: "CSTB", contact: "", adresse: "84 AVENUE JEAN JAURES", cp: "77420", ville: "CHAMPS SUR MARNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0412", societe: "CTI STRASBOURG ILLKIRCH", contact: "", adresse: "650 Boulevard Sébastien Brant", cp: "67400", ville: "Illkirch-Graffenstaden", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0413", societe: "CTS", contact: "", adresse: "BATIMENT EXPLOITATION", cp: "67200", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0414", societe: "CTS DEPOT ELSAU", contact: "", adresse: "", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0415", societe: "CTS SOUS STATION ATELIER UPK", contact: "", adresse: "SOUS STATION ATELIER UPK", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0416", societe: "CTS SOUS STATION PORTE DES ROMAINS", contact: "", adresse: "XXXXX", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0417", societe: "CTS SOUS-STATION PAPETERIE", contact: "", adresse: "XXX", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0418", societe: "CURTIL SAS", contact: "", adresse: "9 RUE DU PLAN D'ACIER", cp: "39200", ville: "SAINT CLAUDE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0419", societe: "DAIMAY CREUTZWALD SAS", contact: "", adresse: "7 RUE DE GRENOBLE", cp: "57150", ville: "CREUTZWALD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0420", societe: "DALKIA - REGION ILE DE FRANCE (71350)", contact: "", adresse: "TSA 85501", cp: "59784", ville: "LILLE CEDEX 9", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0421", societe: "DALKIA (SIEGE SOCIAL)", contact: "", adresse: "37 AVENUE DU MARECHAL DE LATTRE DE TASSIGNY, BP 38", cp: "59350", ville: "SAINT ANDRE LEZ LILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0422", societe: "DALKIA / CLERMONT FERRAND", contact: "", adresse: "27 Rue Georges Besse", cp: "63100", ville: "Clermont-Ferrand", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0423", societe: "DALKIA CENTRE OPERATIONNEL TERTIAIRE", contact: "", adresse: "CENTRE OPERATIONNEL TERTIAIRE, 33 PLACE DES COROLLES", cp: "92400", ville: "COURBEVOIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0424", societe: "DALKIA DIRECTION REGIONALE IDF", contact: "", adresse: "TOUR EUROPE 22, PLACE DES COROLLES", cp: "92400", ville: "COURBEVOIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0425", societe: "DALKIA ELECTROTECHNICS (SIEGE) / LA DEFENSE", contact: "", adresse: "33 place des Corolles", cp: "92099", ville: "PARIS LA DEFENSE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0426", societe: "DALKIA EST AGENCE DE METZ", contact: "", adresse: "4 AVENUE SEBASTOPOL, BP 45085", cp: "57073", ville: "METZ CEDEX 03", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0427", societe: "DALKIA EST AGENCE DE NANCY", contact: "", adresse: "AGENCE DE NANCY, 8 RUE DES SABLES, BP 11", cp: "54425", ville: "PULNOY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0428", societe: "DALKIA EST AGENCE STRASBOURG", contact: "", adresse: "3F RUE DU FORT", cp: "67118", ville: "GEISPOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0429", societe: "DALKIA EST DIRECTION", contact: "", adresse: "32 AVENUE CHARLES DE GAULLE", cp: "54272", ville: "ESSEY LES NANCY CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0430", societe: "DALKIA FRANCE", contact: "", adresse: "Quartier Valmy", cp: "92981", ville: "PARIS LA DEFENSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0431", societe: "DALKIA ROUEN", contact: "", adresse: "320 Voie C, ZA LA BRIQUETERIE", cp: "76160", ville: "Saint-Jacques-Sur-Darnétal", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0432", societe: "DANONE / GIF SUR YVETTE", contact: "", adresse: "ZAC DU MOULON", cp: "91190", ville: "GIF-SUR-YVETTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0433", societe: "DARAMIC SELESTAT", contact: "", adresse: "25 RUE WESTRICH", cp: "67600", ville: "SELESTAT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0434", societe: "DARTY / MOUSSY LE NEUF 77", contact: "", adresse: "", cp: "77230", ville: "MOUSSY LE NEUF", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0435", societe: "DATA CENTER BNP PARIBAS / BAILLY ROMAINVILLIERS", contact: "", adresse: "1 Avenue Pierre-Gilles de Gennes", cp: "77700", ville: "Bailly-Romainvilliers", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0436", societe: "DAXTER", contact: "", adresse: "10 BOULEVARD FLANDRIN", cp: "75116", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0437", societe: "DB SCHENKER AMIENS POULAINVILLE", contact: "GEOFFREY GUEVILLE, geoffrey.gueville@dbschenker.com, 06 07 11 36 64", adresse: "RUE HENRI ET GERMAIN DESJARDIN", cp: "80260", ville: "POULAINVILLE", email: "", telephone: "03 22 09 00 84" },
-  { id: uid(), code: "CLI-0438", societe: "DCML (DATA CENTER MUTUALISE DE LORRAINE)", contact: "", adresse: "2 RUE JEAN ZAY, CNRS", cp: "54500", ville: "VANDOEUVRE LES NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0439", societe: "DE DIETRICH / ZINSWILLER", contact: "", adresse: "RUE PRINCIPALE", cp: "67110", ville: "ZINSWILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0440", societe: "DECATHLON", contact: "", adresse: "4 RUE PROFESSEUR LANGEVIN", cp: "59000", ville: "LILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0441", societe: "DELIFRANCE ROMANS", contact: "", adresse: "ZI LES CHASSES, RUE NICOLAS APPERT", cp: "26100", ville: "ROMANS SUR ISERE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0442", societe: "DELPHARM", contact: "", adresse: "6 Boulevard de l'europe", cp: "21800", ville: "Quetigny", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0443", societe: "DELPHARM DIJON", contact: "", adresse: "6 BOULEVARD DE L'EUROPE", cp: "21800", ville: "QUETIGNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0444", societe: "DELPHARM HUNINGUE", contact: "", adresse: "26 RUE DE LA CHAPELLE", cp: "68330", ville: "HUNINGUE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0445", societe: "DELPHARM REIMS", contact: "", adresse: "10 RUE COLONNEL CHARBONNEAUX - CS 50034", cp: "51721", ville: "REIMS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0446", societe: "DEPARTEMENT DE MEURTHE ET MOSELLE / NANCY", contact: "", adresse: "48 Esplanade Jacques Baudot, CS 90019", cp: "54035 CEDEX", ville: "Nancy", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0447", societe: "DERICHEBOURG ENERGIE", contact: "", adresse: "35 RUE DE VALENTON", cp: "94046", ville: "CRETEIL CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0448", societe: "DEUX ALPES LOISIRS", contact: "", adresse: "IMMEUBLE LE MEIJOTEL", cp: "38860", ville: "MONT DE LANS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0449", societe: "DGAC - DSAC CENTRE EST", contact: "", adresse: "DEPARTEMENT", cp: "69125", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0450", societe: "DGAC - SNA CENTRE EST", contact: "", adresse: "SERVICE ADMINISTRATIF / MAGASINIER", cp: "69125", ville: "LYON SAINT EXUPERY AEROPORT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0451", societe: "DGAC BALE MULHOUSE", contact: "", adresse: "AEROPORT BÂLE MULHOUSE, BP 60120", cp: "68304", ville: "SAINT LOUIS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0452", societe: "DGAC CLERMONT-FERRAND", contact: "", adresse: "AEROPORT DE CLERMONT FERRAND", cp: "63510", ville: "AULNAT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0453", societe: "DGAC PIERRE SUR HAUTE (PSH)", contact: "", adresse: "COL DU BEAL", cp: "63000", ville: "PIERRE SUR HAUTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0454", societe: "DGAC RADAR DE BLOTZHEIM", contact: "", adresse: "777 ALLÉE DU CASINO", cp: "68730", ville: "BLOTZHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0455", societe: "DIAGAST", contact: "", adresse: "251 Avenue Eugène Avinée", cp: "59120", ville: "Loos", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0456", societe: "DISI EST", contact: "", adresse: "17 Rue du Général Picquart", cp: "67000", ville: "Strasbourg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0457", societe: "DISI GRAND EST - ETABLISSEMENT DE METZ", contact: "", adresse: "31 PLACE ST THIEBAULT", cp: "57036", ville: "METZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0458", societe: "DISI GRAND EST (ESI DE STRASBOURG NEUDORF - ETABLISSEMENT DES SERVICES INFORMATIQUES)", contact: "", adresse: "23 RUE JOSEPH GUERBER, BP 220", cp: "67027", ville: "STRASBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0459", societe: "DISI GRAND EST (ESI REIMS)", contact: "", adresse: "22 BOULEVARD PASTEUR", cp: "51000", ville: "REIMS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0460", societe: "DJIN EOLE (EX STORENGY ELENGY)", contact: "", adresse: "11 AVENUE MICHEL RICARD", cp: "92270", ville: "BOIS COLOMBES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0461", societe: "DMC TISSUS", contact: "", adresse: "14 RUE DU COMMANDANT MARCEAU", cp: "68550", ville: "SAINT AMARIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0462", societe: "DOMAINE SKIABLE OZ VAUJANY", contact: "", adresse: "GARE DU TELEPHERIQUE ROUTE DES COMBES", cp: "38114", ville: "VAUJANY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0463", societe: "DOMNIS", contact: "", adresse: "10 RUE MARTEL", cp: "75010", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0464", societe: "DOW AGROSCIENCES (CORTEVA) / DRUSENHEIM", contact: "", adresse: "8 ROUTE DE HERRLISHEIM", cp: "67410", ville: "DRUSENHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0465", societe: "DR OETKER SCHIRMECK", contact: "", adresse: "ZA LE CHIMPY, RUE DES GRIVES", cp: "67130", ville: "SCHIRMECK", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0466", societe: "DRAKA", contact: "", adresse: "644 BOULEVARD E", cp: "62138", ville: "BILLY-BERCLAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0467", societe: "DS SMITH KAYSERSBERG", contact: "", adresse: "77 ROUTE DE LAPOUTROIE", cp: "68240", ville: "KAYSERSBERG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0468", societe: "DUMAREY POWERGLIDE", contact: "Luc KELLER, luc.keller@punchpowerglide.com, 06 60 64 20 36", adresse: "81 RUE DE LA ROCHELLE", cp: "67000", ville: "STRASBOURG", email: "", telephone: "03 88 55 87 08" },
-  { id: uid(), code: "CLI-0469", societe: "E.LECLERC ERSTEIN", contact: "", adresse: "45 RUE DU PRINTEMPS", cp: "67150", ville: "ERSTEIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0470", societe: "E.P.E", contact: "", adresse: "718 RUE DE LA DIVISION LECLERC", cp: "88140", ville: "BULGNEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0471", societe: "EATON INDUSTRIES", contact: "", adresse: "103 – 105, RUE DES 3 FONTANOT", cp: "92000", ville: "NANTERRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0472", societe: "EBAY", contact: "", adresse: "21 RUE DE LA BANQUE", cp: "75002", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0473", societe: "ECOLE CENTRALE DE LYON", contact: "", adresse: "36 AVENUE GUY DE COLLONGUES", cp: "69134", ville: "ECULLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0474", societe: "ECOLE DE LA SANTE / LYON", contact: "", adresse: "8 AV ROCKEFELLER", cp: "69008", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0475", societe: "ECOLE EUROPEENNE DE STRASBOURG", contact: "", adresse: "2 RUE PETER SCHWARBER", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0476", societe: "ECOMUSEE D'ALSACE", contact: "", adresse: "Chemin du Grosswald", cp: "68190", ville: "Ungersheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0477", societe: "ECOSUN EXPERT", contact: "", adresse: "ZONING INDUSTRIEL OUEST", cp: "68490", ville: "HOMBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0478", societe: "EDF CRISTAL", contact: "", adresse: "113 BD STALINGRAD", cp: "69100", ville: "VILLEURBANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0479", societe: "EDF ENR PHOTOWATT BOURGOIN", contact: "", adresse: "ZI CHAMPLEURI", cp: "38300", ville: "BOURGOIN JALLIEU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0480", societe: "EDF GMH (GROUPE MAINTENANCE HYDRAULIQUE)", contact: "", adresse: "BP N°7", cp: "68490", ville: "OTTMARSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0481", societe: "EDF PRIMAT", contact: "", adresse: "190/194, RUE GARIBALDI", cp: "69003", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0482", societe: "EDF ST SIDOINE", contact: "", adresse: "12 ET 20 RUE SAINT SIDOINE", cp: "69003", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0483", societe: "EDF THIERS", contact: "", adresse: "196, AVENUE THIERS", cp: "69461", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0484", societe: "EDF VILLEURBANNE SEPTEN", contact: "", adresse: "12/14 AVENUE DUTRIEVOZ", cp: "69100", ville: "VILLEURBANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0485", societe: "EDF-CNPE BUGEY", contact: "", adresse: "BP 60120", cp: "01155", ville: "LAGNIEU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0486", societe: "EE LORRAINE (EIFFAGE) / DONCHERY", contact: "", adresse: "ZI CD54", cp: "08350", ville: "DONCHERY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0487", societe: "EES - CLEMESSY (EIFFAGE) / MULHOUSE", contact: "", adresse: "18 RUE DE THANN BP 52499", cp: "68057", ville: "MULHOUSE CEDEX 2", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0488", societe: "EES - CLEMESSY HAMBACH (EIFFAGE)", contact: "", adresse: "2 RUE JEAN MONNET", cp: "57910", ville: "HAMBACH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0489", societe: "EES - CLEVIA NORMANDIE - GIBERVILLE (EIFFAGE)", contact: "", adresse: "AGENCE DE GIBERVILLE, RUE JACQUES PREVERT", cp: "14730", ville: "GIBERVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0490", societe: "EES - CLEVIA OUEST (EIFFAGE) / SAINT GREGOIRE", contact: "", adresse: "CS36877", cp: "35768", ville: "SAINT GREGOIRE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0491", societe: "EES - SO / EIFFAGE TOULOUSE", contact: "", adresse: "3 allée des pionniers de l'Aéropostale", cp: "31400", ville: "TOULOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0492", societe: "EES - VL TOURS (EIFFAGE)", contact: "", adresse: "BU00382", cp: "62971", ville: "ARRAS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0493", societe: "EESLO - EIFFAGE ENERGIE SYSTEMES LOIRE OCEAN / CARQUEFOU", contact: "", adresse: "9 RUE DES PETITES INDUSTRIES", cp: "44470", ville: "CARQUEFOU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0494", societe: "EGW MAINTENANCE", contact: "", adresse: "1 RUE CLAUDE CHAPPE", cp: "DUPPIGHEIM", ville: "67120", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0495", societe: "EHPAD BEVIERE", contact: "", adresse: "1 RUE DE BEVIERE", cp: "38000", ville: "GRENOBLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0496", societe: "EHPAD LA DEMI LUNE - LE CREUSEOT", contact: "", adresse: "75 Rue Jouffroy", cp: "71200", ville: "Le Creusot", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0497", societe: "EHPAD SAINT AUGUSTIN", contact: "", adresse: "68 RUE DES PLANTES", cp: "75014", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0498", societe: "EHPAD SOEURS DE LA CROIX", contact: "", adresse: "20 RUE DE LA CHARITE", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0499", societe: "EHPAD TRICASSAYE LANGRES", contact: "", adresse: "Avenue de la Résistance", cp: "52200", ville: "Langres", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0500", societe: "EIFFAGE ENERGIE SYSTEMES - CLEVIA MEDITERRANEE / OLLIOULES", contact: "", adresse: "Chemin du Kiosque", cp: "83190", ville: "Ollioules", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0501", societe: "EIFFAGE ENERGIE INDUSTRIE NORD (AGENCE AMIENS)", contact: "", adresse: "36 AVENUE DE L'ETOILE DU SUD", cp: "80440", ville: "GLISY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0502", societe: "EIFFAGE ENERGIE INDUSTRIE NORD VERQUIN", contact: "", adresse: "D 937", cp: "62131", ville: "VERQUIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0503", societe: "EIFFAGE ENERGIE INDUSTRIE TERTIAIRE LOIRE AUVERGNE", contact: "", adresse: "116 RUE DU COMMANDANT AUBREY", cp: "03300", ville: "CREUZIER-LE-VIEUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0504", societe: "EIFFAGE ENERGIE OSTWALD", contact: "", adresse: "1, RUE PIERRE ET MARIE CURIE", cp: "67540", ville: "OSTWALD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0505", societe: "EIFFAGE ENERGIE SERVICES ILE DE FRANCE BAGNOLET", contact: "", adresse: "IMMEUBLE LES MERCURIALES", cp: "93176", ville: "BAGNOLET CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0506", societe: "EIFFAGE ENERGIE ST DENIS", contact: "", adresse: "117 RU DU LANDY", cp: "93213", ville: "LA PLAINE SAINT DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0507", societe: "EIFFAGE ENERGIE SYSTEME-CLEMESSY NUCLEAIRE", contact: "", adresse: "400 AV COTIER, 01150 SAINT VULBAS", cp: "01155", ville: "LAGNIEU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0508", societe: "EIFFAGE ENERGIE SYSTEMES - AQUITAINE - PESSAC", contact: "", adresse: "32 Avenue Gustave Eiffel", cp: "33600", ville: "Pessac", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0509", societe: "EIFFAGE ENERGIE SYSTEMES - CENTRE LOIRE / ORLEANS", contact: "", adresse: "Parc des Châtelliers", cp: "45000", ville: "ORLEANS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0510", societe: "EIFFAGE ENERGIE SYSTEMES - CLEMESSY - ST APOLLINAIRE", contact: "", adresse: "12 Rue de la Redoute", cp: "21850", ville: "Saint-Apollinaire", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0511", societe: "EIFFAGE ENERGIE SYSTEMES – CLEVIA CENTRE EST/ JONAGE", contact: "", adresse: "Service Comptabilité, 10 BOULEVARD MARCEL DASSAULT", cp: "69330", ville: "JONAGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0512", societe: "EIFFAGE ENERGIE SYSTEMES - HAUTE NORMANDIE / ST ETIENNE DU ROUVRAY", contact: "", adresse: "Parc de la Vente Olivier", cp: "76800", ville: "SAINT ETIENNE DU ROUVRAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0513", societe: "EIFFAGE ENERGIE SYSTEMES - LOIRE OCEAN / NANTES", contact: "", adresse: "1 rue Michel Manoll", cp: "44307", ville: "NANTES CEDEX 3", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0514", societe: "EIFFAGE ENERGIE SYSTEMES - POITOU CHARENTES / POITIERS", contact: "", adresse: "3 rue des Entrepreneurs", cp: "86000", ville: "POITIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0515", societe: "EIFFAGE ENERGIE SYSTEMES - ROCHE LA MOLIERE", contact: "", adresse: "13 Boulevard Gruner", cp: "42230", ville: "Roche-la-Molière", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0516", societe: "EIFFAGE ENERGIE SYSTEMES CENTRE LOIRE", contact: "", adresse: "Allée des Italiens", cp: "18570", ville: "La Chapelle-Saint-Ursin", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0517", societe: "EIFFAGE ENERGIE SYSTEMES CLEVIA MEDITERRANEE / NICE", contact: "", adresse: "724 Bd du Mercantour", cp: "06200", ville: "NICE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0518", societe: "EIFFAGE ENERGIE SYSTEMES LORRAINE MARNE ARDENNES / LUDRES", contact: "", adresse: "130 rue Pierre Gilles de Gennes", cp: "54710", ville: "LUDRES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0519", societe: "EIFFAGE ENERGIE SYSTEMES VERQUIN", contact: "", adresse: "", cp: "6131", ville: "Verquin", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0520", societe: "EIFFAGE ENERGIE SYSTEMES/ CLEVIA NORMANDIE", contact: "", adresse: "Avenue du Cantipou", cp: "76700", ville: "Harfleur", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0521", societe: "EIFFAGE ENERGIE TERTIAIRE NORD OUTREAU", contact: "", adresse: "7 RUE RENE CASSIN", cp: "62230", ville: "OUTREAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0522", societe: "EIFFAGE ENERGIE WAMBRECHIES", contact: "", adresse: "ZA PARC DU MOULIN, CS 70037", cp: "59118", ville: "WAMBRECHIES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0523", societe: "EIFFAGE ENERGIES SYSTEMES - GAME INGENIERIE", contact: "", adresse: "", cp: "91540", ville: "ORMOY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0524", societe: "EIFFAGE METAL LAUTERBOURG", contact: "", adresse: "1 Route de Mothern", cp: "67630", ville: "Lauterbourg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0525", societe: "EIFFAGE VERQUIN", contact: "", adresse: "AGENCE DE VERQUIN - DEPARTEMENT POSTES", cp: "62131", ville: "VERQUIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0526", societe: "EIMI ELEC", contact: "", adresse: "55 RUE DES TONNELIERS, BP 92105", cp: "25462", ville: "ETUPES CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0527", societe: "EJ PICARDIE", contact: "", adresse: "ZI DE MARIVAUX", cp: "60149", ville: "SAINT CREPIN IBOUVILLERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0528", societe: "EJ SAS", contact: "", adresse: "5 Rue Ampère", cp: "69680", ville: "Chassieu", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0529", societe: "EKIPA (ANCIENNEMENT PARISOT)", contact: "", adresse: "73 Rue Gén Leclerc", cp: "88500", ville: "MATTAINCOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0530", societe: "ELIOR FA3C", contact: "", adresse: "11, ALLÉE DE L'ARCHE", cp: "92032", ville: "PARIS LA DEFENSE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0531", societe: "ELSAN CLINIQUE NOUVELLE DU FOREZ", contact: "", adresse: "28 Route Nouvelle", cp: "42600", ville: "Montbrison", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0532", societe: "ELSAN NOTRE DAME", contact: "", adresse: "345 Avenue Pierre Brossolette", cp: "83300", ville: "Draguignan", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0533", societe: "ELYDAN", contact: "", adresse: "11 RUE D'ALTKIRCH", cp: "68580", ville: "SEPPOIS-LE-BAS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0534", societe: "ENEDIS ST EGREVE", contact: "", adresse: "16 AVENUE DE L'ILE BRUNE, UE-0791", cp: "38120", ville: "SAINT EGREVE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0535", societe: "ENERGILEC / ERMONT", contact: "", adresse: "10 14 AVENUE LOUIS ARMAND", cp: "95124", ville: "ERMONT CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0536", societe: "ENGIE AXIMA", contact: "", adresse: "33 Rue des Clotais", cp: "94364", ville: "Bry-sur-Marne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0537", societe: "ENGIE AXIMA - AGENCE DE STRASBOURG", contact: "", adresse: "6 RUE DE L'ATOME - BP9", cp: "67801", ville: "BISCHHEIM CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0538", societe: "ENGIE AXIMA BRON", contact: "", adresse: "3 ALLEE DES GINGKOS", cp: "69673", ville: "BRON CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0539", societe: "ENGIE COFELY", contact: "", adresse: "BÂTIMENT OLYMPE", cp: "93120", ville: "SAINT-DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0540", societe: "ENGIE COFELY (AGENCE DE COURBEVOIE)", contact: "", adresse: "TOUR T1 - ENGIE, 1 PLACE SAMUEL DE CHAMPLAIN", cp: "92400", ville: "COURBEVOIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0541", societe: "ENGIE COFELY AGENCE LYON METROPOLE", contact: "", adresse: "127 AVENUE BARTHELEMY BUYER", cp: "69005", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0542", societe: "ENGIE COFELY DIRECTION REGIONALE NORD-EST", contact: "", adresse: "35 AVENUE DU XXEME CORPS", cp: "54005", ville: "NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0543", societe: "ENGIE COFELY LOIRE PORTE DU SUD", contact: "", adresse: "LA PROVENDE", cp: "42390", ville: "VILLARS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0544", societe: "ENGIE ENERGIE SERVICES (AGENCE FRANCHE-COMTE)", contact: "", adresse: "9 Rue Édouard Belin", cp: "25000", ville: "Besançon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0545", societe: "ENGIE ENERGIE SERVICES (SIÈGE)", contact: "", adresse: "TOUR T1, FAUBOURG DE L'ARCHE", cp: "92930", ville: "PARIS LA DÉFENSE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0546", societe: "ENGIE INEO", contact: "", adresse: "IMMEUBLE OBJECTIF", cp: "92600", ville: "ASNIERES SUR SEINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0547", societe: "ENGIE INEO - AGENCE VILLENEUVE D'ASCQ", contact: "", adresse: "420 RUE JULES GUESDE", cp: "59650", ville: "VILLENEUVE D'ASCQ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0548", societe: "ENGIE INEO INDUSTRIE ET TERTIAIRE EST DIJON", contact: "", adresse: "74 AVENUE RAYMOND POINCARE", cp: "21078", ville: "DIJON CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0549", societe: "ENGIE SOLUTION AGENCE DE FORBACH", contact: "", adresse: "RUE DU HOLWEG", cp: "57600", ville: "FORBACH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0550", societe: "ENGIE SOLUTION AGENCE MONTARGIS", contact: "", adresse: "4 RUE GUSTAVE EIFFEL", cp: "45500", ville: "GIENS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0551", societe: "ENGIE SOLUTIONS", contact: "", adresse: "IMMEUBLE IRIS, 84 RUE CHARLES MICHELS", cp: "93284", ville: "SAINT DENIS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0552", societe: "ENGIE SOLUTIONS - AGENCE STRASBOURG", contact: "", adresse: "1000 BOULEVARD SEBASTIEN BRANT", cp: "67400", ville: "ILLKIRCH GRAFFENSTADEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0553", societe: "ENGIE SOLUTIONS AGENCE MAINE CENTRE POITOU", contact: "", adresse: "6 RUE LEANDRE POURCELOT", cp: "37540", ville: "SAINT CYR SUR LOIRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0554", societe: "ENGIE SOLUTIONS BOURGOGNE FRANCHE COMTÉ", contact: "", adresse: "7 Boulevard Eiffel", cp: "21600", ville: "Longvic", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0555", societe: "ENGIE SOLUTIONS LYON", contact: "", adresse: "127 AVENUE BARTHÉLÉMY BUYER – BP 5066", cp: "69246", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0556", societe: "ENGINEERING MV", contact: "", adresse: "82 Avenue du Château", cp: "95310", ville: "Saint-Ouen-l’Aumône", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0557", societe: "ENGY COFELY SITE EUROAIRPORT", contact: "", adresse: "SITE EUROAIRPORT, COGENERATION", cp: "68304", ville: "SAINT-LOUIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0558", societe: "EPCC PONT DU GARD", contact: "", adresse: "LA BEGUDE, 400 ROUTE DU PONT DU GARD", cp: "30210", ville: "VERS PONT DU GARD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0559", societe: "EPF / CACHAN", contact: "", adresse: "5 AVENUE DU PRÉSIDENT WILSON", cp: "94230", ville: "CACHAN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0560", societe: "EPSA MARKETPLACE", contact: "", adresse: "11 Rue des Malines", cp: "91090", ville: "Lisses", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0561", societe: "EPSM VAL DE LYS ARTOIS", contact: "", adresse: "DIRECTION DU PATRIMOINE", cp: "62350", ville: "SAINT VENANT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0562", societe: "EQIOM (ANCIENNEMENT HOLCIM)", contact: "", adresse: "USINE DE HEMING, ROUTE DE LORQUIN", cp: "57830", ville: "HEMING", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0563", societe: "EQUINIX (FRANCE)", contact: "", adresse: "114 RUE AMBROISE CROIZAT", cp: "93200", ville: "SAINT DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0564", societe: "EQUINIX BORDEAUX", contact: "", adresse: "39 RUE DE STRASBOURG", cp: "33520", ville: "BORDEAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0565", societe: "EQUINIX HYPERSACALE 1 (PA9)", contact: "", adresse: "114 RUE AMBROISE CROIZAT", cp: "93200", ville: "SAINT DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0566", societe: "EQUINIX HYPERSCALE 1 SAS", contact: "", adresse: "110 AVENUE DU GENERAL LECLERC", cp: "93500", ville: "PANTIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0567", societe: "EQUINIX PA1", contact: "", adresse: "167 RUE DE LA BELLE ETOILE", cp: "95948", ville: "ROISSY CDG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0568", societe: "EQUINIX PA10", contact: "", adresse: "114 Rue Ambroise Croizat", cp: "93200", ville: "St.-Denis", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0569", societe: "EQUINIX PA13 HYPERSCALE 2", contact: "", adresse: "9 Avenue du Maréchal Juin", cp: "92360", ville: "Meudon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0570", societe: "EQUINIX PA2", contact: "", adresse: "114 RUE AMBROISE CROIZAT", cp: "93200", ville: "SAINT DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0571", societe: "EQUINIX PA3", contact: "", adresse: "114 RUE AMBROISE CROIZAT", cp: "93200", ville: "SAINT DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0572", societe: "EQUINIX PA3.3", contact: "", adresse: "114 RUE AMBROISE CROIZAT", cp: "93200", ville: "SAINT DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0573", societe: "EQUINIX PA3.4", contact: "", adresse: "114 RUE AMBROISE CROIZAT", cp: "93200", ville: "SAINT DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0574", societe: "EQUINIX PA4", contact: "", adresse: "110 BIS AVENUE DU GENERAL LECLERC", cp: "93500", ville: "PANTIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0575", societe: "EQUINIX PA5", contact: "", adresse: "45 AVENUE VICTOR HUGO", cp: "93300", ville: "AUBERVILLIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0576", societe: "EQUINIX PA6", contact: "", adresse: "10 RUE WALDECK ROCHET", cp: "93300", ville: "AUBERVILLIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0577", societe: "EQUINIX PA7", contact: "", adresse: "130-136 BOULEVARD DE VERDUN", cp: "92400", ville: "COURBEVOIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0578", societe: "EQUINIX PA8", contact: "", adresse: "110 BIS AVENUE DU GENERAL LECLERC", cp: "93500", ville: "PANTIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0579", societe: "ERHARD PATISSIER GLACIER", contact: "", adresse: "5 ROUTE DE MONCEY", cp: "25870", ville: "THUREY LE MONT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0580", societe: "ES SERVICES ENERGETIQUES - AGENCE DE NANCY", contact: "", adresse: "16 BOULEVARD DE LA MOTHE", cp: "54000", ville: "NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0581", societe: "ES SERVICES ENERGETIQUES - AGENCE DE STRASBOURG", contact: "", adresse: "5 RUE ANDRE MARIE AMPERE", cp: "67450", ville: "MUNDOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0582", societe: "ES SERVICES ENERGETIQUES - AGENCE ILLKIRCH", contact: "", adresse: "1 RUE DU DOCTEUR ALBERT SCHWEITZER", cp: "67400", ville: "ILLKIRCH GRAFFENSTADEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0583", societe: "ESID DE METZ", contact: "", adresse: "CASERNE NEY CS 30001", cp: "57044", ville: "METZ CEDEX 01", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0584", societe: "ESSITY (SCA KUNHEIM)", contact: "", adresse: "USINE DE KUNHEIM", cp: "68320", ville: "KUNHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0585", societe: "EST BIOGAZ NOVIANT AUX PRES", contact: "JEAN-PAUL MALTEMPI , jean-paul.maltempi@dalkia.fr, 06 29 79 17 11", adresse: "1 CHEMIN RURAL DIT DE SAINT JEAN", cp: "57385", ville: "NOVIANT AUX PRES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0586", societe: "EST INDUSTRIES", contact: "", adresse: "8 Rue des Vosges", cp: "57430", ville: "Sarralbe", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0587", societe: "EST RESEAUX", contact: "", adresse: "21 CHEMIN DES DAMES", cp: "57370", ville: "PHALSBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0588", societe: "ETS BARILLET / 45", contact: "", adresse: "12 Rue du Petit Hameau", cp: "45110", ville: "Châteauneuf-sur-Loire", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0589", societe: "EUCLYDE", contact: "", adresse: "2 RUE ALBERT EINSTEIN", cp: "25000", ville: "BESANCON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0590", societe: "EURIAL CREST", contact: "", adresse: "RUE HENRI BARBUSSE", cp: "26400", ville: "CREST", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0591", societe: "EUROCAST THONON", contact: "", adresse: "81 AVENUE DE SAINT DISDILLE", cp: "74200", ville: "THONON LES BAINS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0592", societe: "EUROGEM", contact: "", adresse: "DIRECTION ILE DE France, 10 RUE WALDECK ROCHET", cp: "93300", ville: "AUBERVILLIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0593", societe: "EUROGEM STRASBOURG", contact: "", adresse: "38 ROUTE DE L'HOPITAL", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0594", societe: "EUROGLAS", contact: "", adresse: "Zone Industrielle", cp: "68490", ville: "HOMBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0595", societe: "EURO-INFORMATION (PAYEUR CM-CIC SERVICES)", contact: "", adresse: "4 RUE FREDERIC GUILLAUME RAIFFEISEN", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0596", societe: "EUROPORTE HENING BEAUMONT (OIGNIES)", contact: "", adresse: "9 Rue Du Tordoir, SITE DE LA FOSSE", cp: "62590", ville: "Oignies", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0597", societe: "EUROPORTE PARIS", contact: "", adresse: "6 Square de l'opéra-louis jouvet, 1ER ETAGE", cp: "75009", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0598", societe: "EUROPORTE TOUR LILLEUROPE (SIEGE)", contact: "", adresse: "11 PARVIS DE ROTHERDAM, CS 30004", cp: "59777", ville: "EURALILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0599", societe: "EUROSERUM", contact: "", adresse: "ROUTE DE VILLERS", cp: "70170", ville: "PORT SUR SAONE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0600", societe: "EUROSERUM ST-MARTIN", contact: "", adresse: "RD906", cp: "71118", ville: "SAINT MARTIN BELLE ROCHE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0601", societe: "EUROSITE", contact: "", adresse: "12 RUE DE LA MONTJOIE", cp: "93210", ville: "LA PLAINE SAINT DENIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0602", societe: "EUROSTYLE SYSTEMS MOLINGES", contact: "", adresse: "ZA EN GRAIN", cp: "39360", ville: "CHASSAL MOLINGES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0603", societe: "EUROTUNNEL", contact: "", adresse: "TERMINAL France, MAGASIN - BATIMENT F29", cp: "62904", ville: "COQUELLES CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0604", societe: "EVERBAL", contact: "", adresse: "RUE D'AVAUX", cp: "02190", ville: "ÉVERGNICOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0605", societe: "EVOBUS", contact: "", adresse: "33 RUE DE L'INDUSTRIE", cp: "67720", ville: "HOERDT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0606", societe: "EVOBUS FRANCE (DAIMLER)", contact: "", adresse: "CHEMIN DU STADE,", cp: "55500", ville: "LIGNY-EN-BARROIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0607", societe: "EVONIK", contact: "", adresse: "RUE GASTON MONMOUSSEAU", cp: "38556", ville: "ROUSSILLON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0608", societe: "EXA ECS", contact: "", adresse: "1 BIS RUE DU PETIT CLAMART", cp: "78140", ville: "VELIZY VILLACOUBLAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0609", societe: "F2J JAPY", contact: "", adresse: "143 Rue des Graviers, CS 22059", cp: "25700", ville: "Valentigney", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0610", societe: "FAIVELEYTECH - GRAND PERRET", contact: "", adresse: "28 ROUTE DE LYON", cp: "39200", ville: "SAINT CLAUDE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0611", societe: "FAM SAINTE GENEVIEVE (FOYER D'ACCUEIL MÉDICALISÉ)", contact: "", adresse: "68 RUE DES PLANTES", cp: "75014", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0612", societe: "FAREVA AMBOISE", contact: "", adresse: "29 ROUTE DES INDUSTRIES", cp: "37530", ville: "POCÉ-SUR-CISSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0613", societe: "FASHION CENTER", contact: "", adresse: "70 AVENUE VICTOR HUGO", cp: "93300", ville: "AUBERVILLIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0614", societe: "FAUCHE MAINTENANCE", contact: "", adresse: "Centre de services de Lille - Agence maintenance Nord, PARC DU MELANTOIS", cp: "59810", ville: "LESQUIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0615", societe: "FAUCHE VEODIS ELECTRICITE", contact: "", adresse: "4 Rue Fernand Pelloutier", cp: "38130", ville: "Échirolles", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0616", societe: "FAURECIA", contact: "", adresse: "Avenue Louis Coudant", cp: "58340", ville: "Cercy-la-Tour", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0617", societe: "FAURECIA DIVISION BLOC AVANT", contact: "", adresse: "ZA DU PONT D'ASPACH, USINE DE BURNHAUPT, 50 RUE DE LA GARE", cp: "68520", ville: "BURNHAUPT LE HAUT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0618", societe: "FAURECIA SAINT QUENTIN", contact: "", adresse: "RUE ANDRÉ MISSENARD", cp: "02100", ville: "SAINT-QUENTIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0619", societe: "FBM - FONDERIES DE BROUSSEVAL ET MONTREUIL", contact: "", adresse: "1 Rue des Fonderies", cp: "52130", ville: "Brousseval", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0620", societe: "FEDERAL MODUL / GARRENES SUR EURE", contact: "", adresse: "5 Route d'anet", cp: "27780", ville: "Garennes-sur-Eure", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0621", societe: "FEDERATION BTP 57", contact: "", adresse: "3 RUE JEAN ANTOINE CHAPTAL", cp: "57070", ville: "METZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0622", societe: "FEDEX", contact: "", adresse: "22 Avenue des Nations", cp: "93420", ville: "VILLEPINTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0623", societe: "FEDEX", contact: "", adresse: "Route de l'arpenteur", cp: "95700", ville: "Roissy-en-France", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0624", societe: "FENIIX (EX SUEZ RV ENERGIE RAMBERVILLERS (EX SOVVAD))", contact: "", adresse: "9001 ROUTE DE ROMONT", cp: "88700", ville: "RAMBERVILLERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0625", societe: "FERCO S.A.S.", contact: "", adresse: "2 RUE DU VIEUX MOULIN", cp: "57445", ville: "REDING", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0626", societe: "FERROGLOBE", contact: "", adresse: "Route des Salines", cp: "59760", ville: "Grande-Synthe", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0627", societe: "FERROPEM MONTRICHER", contact: "", adresse: "", cp: "73870", ville: "MONTRICHET ALBANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0628", societe: "FFB - FABRIQUE DE FOURNITURE DE BONNÉTAGE", contact: "", adresse: "LES TERRES ROUGES,", cp: "25130", ville: "VILLERS-LE-LAC", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0629", societe: "FIBERWEB FRANCE", contact: "", adresse: "ZONE INDUSTRIELLE", cp: "68600", ville: "BIESHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0630", societe: "FICOMIRRORS FRANCE SAS (GROUPE FICOSA)", contact: "", adresse: "1 RUE ROGER HUSSON", cp: "57260", ville: "DIEUZE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0631", societe: "FIDAY GESTION", contact: "", adresse: "5 RUE DE L'INDUSTRIE", cp: "70360", ville: "CHASSEY LES SCEY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0632", societe: "FIMUREX PLANCHERS", contact: "oceane.ferrand@fimurex.com", adresse: "36 AVENUE DE THIONVILLE", cp: "57140", ville: "WOIPPY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0633", societe: "FLAMM TOP (HCL)", contact: "", adresse: "RUE DE L'ARTISANAT", cp: "57400", ville: "SARREBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0634", societe: "FLENDER", contact: "", adresse: "1 RUE VIEUX MOULIN", cp: "67400", ville: "ILLKIRCH GRAFFENSTADEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0635", societe: "FLEX-N-GATE FRANCE", contact: "", adresse: "18 BIS RUE DE VERDUN", cp: "25400", ville: "AUDINCOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0636", societe: "FM LOGISTIC / BULLY LES MINES", contact: "", adresse: "104 Rue Roger Salengro", cp: "62160", ville: "Bully-les-Mines", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0637", societe: "FM LOGISTIC / ESCRENNES", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZAC SAINT EUTROPE", cp: "45300", ville: "ESCRENNES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0638", societe: "FM LOGISTIC BRUMATH", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZI NORD DE LA ZORN, RUE KRAUTWILLER", cp: "67170", ville: "BRUMATH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0639", societe: "FM LOGISTIC CASTELNAU D'ESTRETEFONDS", contact: "", adresse: "101 Avenue de l'europe", cp: "31620", ville: "Castelnau-d’Estrétefonds", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0640", societe: "FM LOGISTIC CHALONS EN CHAMPAGNE", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "RUE CHARLES MARIE RAVEL", cp: "51520", ville: "ST MARTIN SUR LE PRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0641", societe: "FM LOGISTIC CHATEAU THIERRY", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZID DE L'OMOIS, BP 107", cp: "02403", ville: "CHATEAU THIERRY CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0642", societe: "FM LOGISTIC CHÂTRES", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "Avenue Louis Renault, ZAC DU VAL BREON, BAT 6 - ZONE LOGISTIQUE", cp: "77610", ville: "Châtres", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0643", societe: "FM LOGISTIC CORPORTE SAS PHALSBOURG", contact: "", adresse: "Rue de l'europe", cp: "57370", ville: "Phalsbourg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0644", societe: "FM LOGISTIC CREPY EN VALOIS 1", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "RUE DU BOIS DE TILLET, BP 60224", cp: "60802", ville: "CREPY EN VALOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0645", societe: "FM LOGISTIC CREPY EN VALOIS 2", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "RUE DU BOIS DE TILLET, BP 60224", cp: "60802", ville: "CREPY EN VALOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0646", societe: "FM LOGISTIC ENTRAIGUES SUR LA SORGUE", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "400 Chemin de Gromelle", cp: "84320", ville: "Entraigues-sur-la-Sorgue", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0647", societe: "FM LOGISTIC EPAUX BEZU", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZI RUE DE L'OMOIS", cp: "02400", ville: "EPAUX BEZU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0648", societe: "FM LOGISTIC FAUVERNEY", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZAE BOULOUSE", cp: "21110", ville: "FAUVERNEY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0649", societe: "FM LOGISTIC FONTENAY TRESIGNY", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZAC DE FREGY", cp: "77610", ville: "FONTENAY TRESIGNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0650", societe: "FM LOGISTIC HEUDEBOUVILLE", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZA ECOPARC, 2 ALLEE DE LA BUTTE A COLAS", cp: "27400", ville: "HEUDEBOUVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0651", societe: "FM LOGISTIC LAUDUN", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "1300 RUE KELLER", cp: "30290", ville: "LAUDUN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0652", societe: "FM LOGISTIC L'HERBERGEMENT", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "90 RUE GEORGES CLEMENCEAU", cp: "85260", ville: "L'HERBERGEMENT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0653", societe: "FM LOGISTIC LONGUEIL SAINTE MARIE", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZAC PARIS OISE, PARC D'ACTICITE , BP 16", cp: "60126", ville: "LONGUEIL SAINTE MARIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0654", societe: "FM LOGISTIC MAROLLES SUR SEINE", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZAC SAINT DONAIN", cp: "77130", ville: "MAROLLES SUR SEINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0655", societe: "FM LOGISTIC MOMMENHEIM", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ROUTE DE BRUMATH", cp: "67670", ville: "MOMMENHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0656", societe: "FM LOGISTIC MORMANT", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "11 RUE LAVOISIER", cp: "77720", ville: "MORMANT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0657", societe: "FM LOGISTIC NEUVILLE AUX BOIS", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "\"ZAE \"\"LE POINT DU JOUR\"\"\"", cp: "45170", ville: "NEUVILLE AUX BOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0658", societe: "FM LOGISTIC ONNAING", contact: "", adresse: "PARC D'ACTIVITE DE LA VALLEE DE L'ESCAUT", cp: "59264", ville: "ONNAING", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0659", societe: "FM LOGISTIC ORLEANS", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "ZI DU SAUSSAYE, RUE DES GENETS", cp: "45590", ville: "SAINT CYR EN VAL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0660", societe: "FM LOGISTIC PHALSBOURG", contact: "", adresse: "ZI MAISON ROUGE, RUE DE L'EUROPE, BP 80236", cp: "57372", ville: "PHALSBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0661", societe: "FM LOGISTIC RESSONS", contact: "Mr DUQUENNE Sebastien - sduquenne@fmlogistic.com", adresse: "RUE DE GOURNAY, R.D. 82", cp: "60490", ville: "RESSONS SUR MATZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0662", societe: "FM LOGISTIC SORGUES", contact: "", adresse: "107 AV MARCEL DASSAULT", cp: "84275", ville: "VEDENES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0663", societe: "FM LOGISTIC TILLOY LES MOFFLAINES", contact: "", adresse: "RUE STEPHENSONZI EST", cp: "62217", ville: "TILLOY LES MOFFLAINES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0664", societe: "FM LOGISTIC VENISSIEUX", contact: "", adresse: "17 Rue André Sentuc, ZAC DE L'ARSENAL", cp: "69200", ville: "Vénissieux", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0665", societe: "FM RETAIL SENS", contact: "", adresse: "ZAC 2", cp: "89150", ville: "Savigny-sur-Clairis", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0666", societe: "FNAC STRASBOURG", contact: "", adresse: "22 PLACE KLEBER", cp: "67080", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0667", societe: "FOCAST SAINT DIZIER", contact: "", adresse: "CHEMIN DU CLOSOT", cp: "52100", ville: "ST DIZIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0668", societe: "FONCIERE MEDICALE N°1", contact: "", adresse: "10 COURS DU TRIANGLE DE L'ARCHE", cp: "92919", ville: "LA DEFENSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0669", societe: "FONDATION DE LA MAISON DU DIACONAT - CHATEAU WALK HAGUENAU", contact: "", adresse: "40 RUE DU DEPUTE HALLEZ", cp: "67500", ville: "HAGUENAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0670", societe: "FONDATION DE LA MAISON DU DIACONAT - FONDERIE", contact: "", adresse: "DIACONAT FONDERIE - ST SAUVEUR", cp: "MULHOUSE", ville: "68100", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0671", societe: "FONDATION DE LA MAISON DU DIACONAT - MULHOUSE ROOSEVELT", contact: "", adresse: "14 BOULEVARD ROOSEVELT", cp: "68067", ville: "MULHOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0672", societe: "FONDATION DE LA MAISON DU DIACONAT - ST JEAN SENTHEIM", contact: "", adresse: "1 GRAND RUE", cp: "68780", ville: "SENTHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0673", societe: "FONDATION DE LA MAISON DU DIACONAT COLMAR", contact: "Franck HEITZLER, frank.heitzler@diaconat-mulhouse.fr, 06 15 86 70 45", adresse: "18 rue Charles Sandherr", cp: "68000", ville: "Colmar", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0674", societe: "FONDATION DE LA MAISON DU DIACONAT NEUENBERG - INGWILLER", contact: "Mr GOFFIN Philippe - philippe.goffin@diaconat-mulhouse.fr", adresse: "38 RUE DU PASTEUR HERRMANN", cp: "67340", ville: "INGWILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0675", societe: "FONDERIE LORRAINE", contact: "", adresse: "RUE DE LA REPUBLIQUE", cp: "57520", ville: "GROSBLIEDERSTROFF", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0676", societe: "FORGES DE L'ALLIANCE / MOLSHEIM", contact: "", adresse: "RUE DES PERDRIX", cp: "67120", ville: "MOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0677", societe: "FORUM DES HALLES", contact: "", adresse: "12 RUE TURBIGO", cp: "75001", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0678", societe: "FRAICHEUR DE PARIS - CENTRALE HDV (ANCIENNEMENT CLIMESPACE)", contact: "", adresse: "5 RUE LOBAU", cp: "75001", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0679", societe: "FRAICHEUR DE PARIS - CENTRALE OPERA-GALFA (ANCIENNEMENT CLIMESPACE)", contact: "", adresse: "79 RUE DE PROVENCE", cp: "75009", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0680", societe: "FRAICHEUR DE PARIS - CENTRALE PNE (ANCIENNEMENT CLIMESPACE)", contact: "", adresse: "139 BLVD MAC DONALD", cp: "75019", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0681", societe: "FRAICHEUR DE PARIS (ANCIENNEMENT CLIMESPACE)", contact: "", adresse: "2 RUE DE TURBIGO", cp: "75001", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0682", societe: "FRAICHEUR DE PARIS BD DIDEROT (ANCIENNEMENT CLIMESPACE)", contact: "", adresse: "3 BOULEVARD DIDEROT", cp: "75012", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0683", societe: "FRAMATOME", contact: "", adresse: "291 ROUTE DE L ELECTRO CHIMIE", cp: "38560", ville: "JARRIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0684", societe: "FRAMATOME (EX AREVA CEZUS)", contact: "", adresse: "60, AVENUE PAUL GIROD", cp: "73400", ville: "UGINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0685", societe: "FRANCE 3 ALSACE STRASBOURG", contact: "", adresse: "POLE FRANCE 3, PLACE DE BORDEAUX, BP 428", cp: "67005", ville: "STRASBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0686", societe: "FRANCE TELEVISION UNIVERSITE LINOIS", contact: "", adresse: "23 RUE LINOIS", cp: "75015", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0687", societe: "FRANCE TELEVISIONS", contact: "", adresse: "7 ESPLANADE HENRI DE FRANCE", cp: "75907 PARIS CEDEX 15", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0688", societe: "FRANCE TELEVISIONS HORACE VERNET", contact: "", adresse: "10, RUE HORACE VERNET", cp: "92130", ville: "ISSY LES MOULINEAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0689", societe: "FRANCE TV OCCITANIE / MONTPELLIER", contact: "", adresse: "10 Allée John Napier", cp: "34000", ville: "Montpellier", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0690", societe: "FREUDENBERG", contact: "", adresse: "20 RUE AMPERE", cp: "68027", ville: "COLMAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0691", societe: "FROMAGERIE DE BLAMONT", contact: "", adresse: "2 Rue de Mignéville", cp: "54450", ville: "Herbéviller", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0692", societe: "FROMAGERIE DES MONTS DE JOUX (COOPERATIVE)", contact: "", adresse: "36 RUE LAURENT TROUTET", cp: "25560", ville: "BANNANS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0693", societe: "FROMAGERIE L'ERMITAGE", contact: "", adresse: "718 Rue de la Division Leclerc", cp: "88140", ville: "BULGNEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0694", societe: "FROMAGERIE MARCILLAT CORCIEUX", contact: "", adresse: "15 RUE DE LA GARE", cp: "88430", ville: "CORCIEUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0695", societe: "FROMAGERIE RENARD-GILLARD", contact: "", adresse: "11 PETITE RUE", cp: "55290", ville: "BIENCOURT SUR ORGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0696", societe: "FROMAGERIES ARNAUD FRERES", contact: "", adresse: "5 AVENUE DE LA GARE", cp: "39800", ville: "POLIGNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0697", societe: "GAGGENAU INDUSTRIE", contact: "", adresse: "RUE BAUDELAIRE", cp: "67640", ville: "LIPSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0698", societe: "GANTOIS", contact: "", adresse: "25 RUE DES 4 FRERE MOUGEOTTE", cp: "88100", ville: "ST DIE DES VOSGES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0699", societe: "GEIE - EXPLOITATION MINIERE DE CHALEUR", contact: "", adresse: "Route de Soultz", cp: "67250", ville: "Kutzenhausen", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0700", societe: "GEIE DU TUNNEL DU MONT BLANC (TMB)", contact: "", adresse: "PLATEFORME FRANCAISE DU TUNNEL", cp: "74400", ville: "CHAMONIX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0701", societe: "GEMDOUBS SAS", contact: "", adresse: "RUE JEAN BAPTISTE WEIBEL", cp: "25220", ville: "NOVILLARS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0702", societe: "GENDARMERIE SATHONAY CAMPS", contact: "", adresse: "Boulevard de l'ouest", cp: "69580", ville: "Sathonay-Camp", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0703", societe: "GENERALE DU SOLAIRE", contact: "", adresse: "", cp: "34130", ville: "MAUGUIO", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0704", societe: "GENERIS VEOLIA PROPRETE", contact: "Mr MICHEL Jérome - jerome.michel2@veolia.com", adresse: "TERTRE DE CHERISY", cp: "77000", ville: "VAUX LE PENIL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0705", societe: "GENINDUS", contact: "", adresse: "22 RUE DES ABBESSES", cp: "77580", ville: "CRECY LA CHAPELLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0706", societe: "GEORGES LOEBER S.A", contact: "", adresse: "16 RUE LAMARTINE", cp: "67300", ville: "SCHILTIGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0707", societe: "GERFLOR GRILLON", contact: "", adresse: "ROUTE DE TAULIGNAN", cp: "84600", ville: "GRILLON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0708", societe: "GERFLOR SAINT PAUL TROIS CHATEAUX", contact: "", adresse: "CHEMIN DU BOIS DES LOTS", cp: "26130", ville: "SAINT PAUL TROIS CHATEAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0709", societe: "GERFLOR TARARE", contact: "", adresse: "43 BOULEVARD GARIBALDI", cp: "69170", ville: "TARARE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0710", societe: "GETLINK (Groupe Eurotunnel)", contact: "", adresse: "Terminal France", cp: "62904", ville: "COQUELLES CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0711", societe: "GETLINK SIEGE", contact: "", adresse: "37 Rue de la Bienfaisance", cp: "75008", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0712", societe: "GEYER LORINA", contact: "", adresse: "", cp: "57670", ville: "MUNSTER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0713", societe: "GHT SAVOIE BELLEY", contact: "", adresse: "Place Lucien Biset", cp: "73000", ville: "Chambéry", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0714", societe: "GIE ACM (PAYEUR CM-CIC SERVICES)", contact: "", adresse: "4 RUE FRÉDÉRIC GUILLAUME RAIFFEISEN", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0715", societe: "GINDRE DUCHAVANY", contact: "", adresse: "31 RUE GIFFARD", cp: "38230", ville: "PONT DE CHERUY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0716", societe: "GLOBAL SWITCH", contact: "", adresse: "7/9 RUE PETIT", cp: "92582", ville: "CLICHY CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0717", societe: "GRAF PLASTURGIE", contact: "", adresse: "", cp: "67120", ville: "DACHSTEIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0718", societe: "GRAFTECH FRANCE SNC", contact: "", adresse: "Rue des Garennes", cp: "62100", ville: "Calais", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0719", societe: "GRAND PALAIS EPHEMERE", contact: "", adresse: "Place Joffre", cp: "75007", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0720", societe: "GRÄNGES POWDER METALLURGY", contact: "", adresse: "ZONE DE L'EUROPORT, RUE DE HASLACH", cp: "57500", ville: "SAINT AVOLD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0721", societe: "GRAVIERE DE STATTMATTEN", contact: "", adresse: "GAGGENAUER STUECK", cp: "67770", ville: "STATTMATTEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0722", societe: "GROUPE ATLANTIC / 45", contact: "", adresse: "17 Rue de la Croix Fauchet", cp: "45140", ville: "Saint-Jean-de-la-Ruelle", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0723", societe: "GROUPE BRANDT / 45", contact: "", adresse: "18 Rue du 11 Octobre", cp: "45140", ville: "Saint-Jean-de-la-Ruelle", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0724", societe: "GROUPE CAMACTE", contact: "", adresse: "14 AVENUE DE L'EUROPE, ESPACE EUROPEEN DE L'ENTREPRISE", cp: "67300", ville: "SCHILTIGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0725", societe: "GROUPE ELECTRICITE VINCENTZ", contact: "", adresse: "8 RUE DES ALPES, ZA", cp: "68127", ville: "NIEDERHERGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0726", societe: "GROUPE HOSPITALIER MUTUALISTE", contact: "", adresse: "CLINIQUE MUTUALISTE", cp: "38000", ville: "GRENOBLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0727", societe: "GROUPE HOSPITALIER NORD-ESSONNE - SITE DE LONGJUMEAU", contact: "", adresse: "159 RUE DU PRÉSIDENT FRANÇOIS MITTERRAND", cp: "91160", ville: "LONGJUMEAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0728", societe: "GROUPE LEFEBVRE", contact: "", adresse: "300 Route de Paris", cp: "76950", ville: "Les Grandes-Ventes", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0729", societe: "GROUPE SEB", contact: "", adresse: "4 M CHEMIN DU PETIT BOIS", cp: "69130", ville: "ECULLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0730", societe: "GROUPE SEB - SIEGE SOCIAL", contact: "", adresse: "112 CHEMIN DU MOULIN CARRON", cp: "69130", ville: "ECULLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0731", societe: "GROUPE SEB SITE DE IS SUR TILLE", contact: "", adresse: "RUE DU TRIAGE", cp: "21120", ville: "IS-SUR-TILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0732", societe: "GROUPE SIAT / NIEDERHASLACH", contact: "", adresse: "69 B RUE PRINCIPALE", cp: "67280", ville: "NIEDERHASLACH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0733", societe: "GROUPE SIAT / URMATT", contact: "Jean NEUVIEME, jneuvieme@sovec-entreprises.fr, 07 85 99 14 75", adresse: "46 RUE DU GENERAL DE GAULLE", cp: "67280", ville: "URMATT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0734", societe: "GROUPEMENT TERRITORIAL SAONE ET LOIRE- BRESSE - MORVAN", contact: "", adresse: "4 Rue du Capitaine Drillien", cp: "71100", ville: "Chalon-sur-Saône", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0735", societe: "GUNTHER TOOLS", contact: "", adresse: "1 RUE MAX CHRISTEN", cp: "67250", ville: "SOULTZ SOUS FORET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0736", societe: "GUSTAVE MULLER (SIÈGE) VOLGELSHEIM", contact: "", adresse: "RUE DU RHIN", cp: "68600", ville: "VOGELSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0737", societe: "GUSTAVE MULLER QUATZENHEIM", contact: "", adresse: "38 ROUTE DE FURDENHEIM", cp: "67117", ville: "QUATZENEHIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0738", societe: "H.B. FULLER ADHESIVES (FORBO) BLOIS", contact: "", adresse: "ALLEE ROBERT SCHUMAN, BP 1308", cp: "41013", ville: "BLOIS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0739", societe: "HAGER ELECTRO GMBH FRANCE", contact: "", adresse: "EDMUND-RUMPLER-STRASSE 3", cp: "CH-60549", ville: "FRANKFURT AM MAIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0740", societe: "HAGER ELECTRO SAS", contact: "", adresse: "132 Boulevard d'europe", cp: "67210", ville: "Obernai", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0741", societe: "HAGER GROUP - PLATEFORME DE VENDENHEIM", contact: "", adresse: "14 Allée de l'ecoparc rhénan", cp: "67550", ville: "Vendenheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0742", societe: "HALLE GECINA", contact: "", adresse: "", cp: "69007", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0743", societe: "HANSGROHE WASSELONNE", contact: "", adresse: "Rue de Wasselonne", cp: "67310", ville: "WASSELONNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0744", societe: "HARTMANN PAUL", contact: "", adresse: "1 LIEU DIT BOIS L'ABBESSE", cp: "68660", ville: "LIEPVRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0745", societe: "HAULLER", contact: "", adresse: "3 Rue de la Gare", cp: "67650", ville: "Dambach-la-Ville", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0746", societe: "HELMKE", contact: "", adresse: "1, ALLEE VERT BOIS", cp: "68840", ville: "PULVERSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0747", societe: "HENDRICKSON", contact: "", adresse: "AVENUE DES FORGES", cp: "90700", ville: "CHATENOIS-LES-FORGES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0748", societe: "HERVE THERMIQUE", contact: "", adresse: "PARC D'ACTIVITES LES PORTES DU VEXIN, 47 RUE AMPERE", cp: "95300", ville: "ENNERY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0749", societe: "HEXCEL COMPOSITES DAGNEUX", contact: "", adresse: "ZONE INDUSTRIELLE LA PLAINE", cp: "01121", ville: "MONTLUEL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0750", societe: "HEXCEL REINFORCEMENTS LES AVENIERES", contact: "", adresse: "QUAI B12, CS 20027", cp: "38630", ville: "LES AVENIERES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0751", societe: "HOGAN LOVELLS PARIS", contact: "", adresse: "IMMEUBLE", cp: "75008", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0752", societe: "HOLIDAY INN EXPRESS STRASBOURG", contact: "", adresse: "Rue de la Corderie", cp: "67100", ville: "Strasbourg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0753", societe: "HONEYWELL GARETT", contact: "", adresse: "2 RUE DE L'AVENIR", cp: "88150", ville: "THAON LES VOSGES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0754", societe: "HOPITAL BEL AIR", contact: "", adresse: "1ET 3 RUE DU FRISCATY, BP 60327", cp: "57100", ville: "THIONVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0755", societe: "HOPITAL CHALON SUR SAONE WILLIAN MOREY", contact: "", adresse: "4 Rue du Capitaine Drillien", cp: "71100", ville: "Chalon-sur-Saône", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0756", societe: "HOPITAL D’INSTRUCTION DES ARMEES SAINTE-ANNE - HIA", contact: "", adresse: "2 Boulevard Sainte-Anne", cp: "83000", ville: "Toulon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0757", societe: "HOPITAL DE MERCY", contact: "", adresse: "1 ALLEE DU CHATEAU", cp: "57530", ville: "ARS-LAQUENEXY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0758", societe: "HOPITAL DE VESOUL", contact: "", adresse: "2 RUE HEYMES, BP 409", cp: "70014", ville: "VESOUL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0759", societe: "HOPITAL DU PAYS SALONAIS", contact: "", adresse: "207 Avenue Julien Fabre", cp: "13658", ville: "Salon-de-Provence", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0760", societe: "HOPITAL FELIX MARECHAL", contact: "", adresse: "RUE XAVIER ROUSSEL", cp: "57000", ville: "METZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0761", societe: "HOPITAL HAYANGE", contact: "", adresse: "53 RUE DE WENDEL", cp: "57700", ville: "HAYANGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0762", societe: "HOPITAL LA TRONCHE GRENOBLE", contact: "", adresse: "AVENUE DES MARQUIS DU GRESIVAUDAN", cp: "38700", ville: "LA TRONCHE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0763", societe: "HOPITAL MAILLOT", contact: "", adresse: "SERVICE TECHNIQUE", cp: "54150", ville: "BRIEY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0764", societe: "HOPITAL MICHALLON GRENOBLE", contact: "", adresse: "BOULEVARD CHANTOURNE", cp: "38700", ville: "LA TRONCHE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0765", societe: "HÔPITAL NEUROCARDIO HCL", contact: "", adresse: "GROUPEMENT HOSPITALIER EST, 59 BOULEVARD PINEL", cp: "69500", ville: "BRON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0766", societe: "HOPITAL PAUL DOUMER", contact: "", adresse: "1 ROUTE DE L'HOPITAL", cp: "60140", ville: "LABRUYERE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0767", societe: "HOPITAL SAINTE MARIE", contact: "", adresse: "167 RUE RAYMOND LOSSERAND", cp: "75014", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0768", societe: "HOPITAL ST JEAN DE MAURIENNE", contact: "", adresse: "SITE ST JEAN DE MAURIENNE, CS 20112", cp: "73302", ville: "ST JEAN DE MAURIENNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0769", societe: "HOPITAUX CIVILS DE COLMAR (PASTEUR)", contact: "", adresse: "39 AVENUE DE LA LIBERTE", cp: "68024", ville: "COLMAR CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0770", societe: "HOPITAUX DE METZ ET DE THIONVILLE", contact: "", adresse: "1 ALLEE DU CHATEAU", cp: "57530", ville: "ARS-LAQUENEXY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0771", societe: "HOTEL MERCURE STRASBOURG", contact: "", adresse: "20 PLACE DE BORDEAUX", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0772", societe: "HSWT FRANCE SAS (EX HYET SWEET / AJINOMOTO ) / GRAVELINES", contact: "", adresse: "PORT 7516", cp: "59820", ville: "GRAVELINES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0773", societe: "HUAWEI TECHNOLOGIES FRANCE SASU", contact: "", adresse: "18 QUAI DU POINT DU JOUR", cp: "92100", ville: "BOULOGNE BILLANCOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0774", societe: "ID LOGISTICS AUSSENLAGER", contact: "", adresse: "Rue du Moulin", cp: "67700", ville: "Landersheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0775", societe: "I-DATECH", contact: "", adresse: "8 Rue René Laennec", cp: "67300", ville: "Schiltigheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0776", societe: "IDEX ENERGIE", contact: "", adresse: "18 20 QUAI DU POINT DU JOUR", cp: "92100", ville: "BOULOGNE BILLANCOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0777", societe: "IDEX ENVIRONNEMENT / AMIENS", contact: "", adresse: "15 rue de la Croix de Pierre", cp: "80080", ville: "AMIENS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0778", societe: "IDEX SINERGIE", contact: "", adresse: "310 ROUTE DU CHAMP DE L'ALE", cp: "74650", ville: "Chavanod", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0779", societe: "IDHEA", contact: "", adresse: "4 RUE DES EPICES", cp: "67270", ville: "HOCHFELDEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0780", societe: "IEC - INSTITUT D'ETUDES COMPTABLES", contact: "", adresse: "15 RUE DU PARC", cp: "67088", ville: "STRASBOURG CEDEX 2", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0781", societe: "IGBMC", contact: "", adresse: "1 RUE LAURENT FRIES", cp: "67400", ville: "ILLKIRCH GRAFFENSTADEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0782", societe: "IKEA STRASBOURG", contact: "", adresse: "28 PLACE DE L'ABATTOIR, BP 9", cp: "67037", ville: "STRASBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0783", societe: "ILEX RENAGE", contact: "", adresse: "ZI LE PLAN", cp: "38140", ville: "Renage", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0784", societe: "IMMEUBLE AUSTRALIA", contact: "", adresse: "15-17-19 rue George Stephenson", cp: "78180", ville: "MONTIGNY LE BRETONNEUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0785", societe: "IMMEUBLE BELLES FEUILLES HUMAKEY", contact: "", adresse: "61/63 RUE DES BELLES FEUILLES", cp: "75116", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0786", societe: "IMMEUBLE BUREAUX LEVALLOIS", contact: "", adresse: "Place Marie-Jeanne Bassot", cp: "92300", ville: "Levallois-Perret", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0787", societe: "IMMEUBLE EUROSQUARE 2", contact: "", adresse: "7 Rue Dora Maar", cp: "93400", ville: "St.-Ouen", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0788", societe: "IMMEUBLE IRRIGO", contact: "", adresse: "27-29 Rue de Paris", cp: "93000", ville: "Bobigny", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0789", societe: "IMMEUBLE KEYS 92 NANTERRE", contact: "", adresse: "107 Rue des Trois Fontanot", cp: "92000", ville: "Nanterre", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0790", societe: "IMMEUBLE LA FELICITE MORLAND", contact: "", adresse: "17 Boulevard Morland", cp: "75004", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0791", societe: "IMMEUBLE QUAI 19 VINCI LYON", contact: "", adresse: "19 QUAI PERRACHE", cp: "69002", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0792", societe: "IMMEUBLE SCOR", contact: "", adresse: "1, AVENUE DU GENERAL DE GAULLE", cp: "92074", ville: "PARIS LA DEFENSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0793", societe: "IMMEUBLE TOMBE ISSOIRE", contact: "", adresse: "27 Rue de la Tombe Issoire", cp: "75014", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0794", societe: "INEO", contact: "", adresse: "AGENCE MAINTENANCE ET SERVICE", cp: "59139", ville: "NOYELLES LES SECLIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0795", societe: "INEO CENTRE", contact: "", adresse: "14 RUE DE LA FONDERIE", cp: "45073", ville: "ORLEANS CEDEX 2", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0796", societe: "INEO EQUANS", contact: "", adresse: "Centre de travaux Sens et Troyes, 12 RUE DE LA FONTAINE", cp: "89100", ville: "Courtois-sur-Yonne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0797", societe: "INEO HAUTS DE FRANCE", contact: "", adresse: "AGENCE MAINTENANCE ET SERVICE", cp: "59139", ville: "NOYELLES LES SECLIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0798", societe: "INEO HOLTZHEIM - (GROUPE EQUANS)", contact: "", adresse: "4 IMPASSE ANTOINE IMBS", cp: "67810", ville: "HOLTZHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0799", societe: "INEO INDUSTRIE & TERTIAIRE EST - AGENCE DE TERVILLE", contact: "", adresse: "18 RUE SELIGUET", cp: "57180", ville: "Terville", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0800", societe: "INEO INDUSTRIE ET TERTIAIRE EST LE CREUSOT", contact: "", adresse: "250C Allée Albert Einstein", cp: "71200", ville: "Le Creusot", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0801", societe: "INEO ITE - GROUPE EQUANS - SAINT AVOLD", contact: "", adresse: "44 RUE DU LAC", cp: "57500", ville: "SAINT AVOLD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0802", societe: "INEO SIEGE IDF", contact: "", adresse: "2 ALLEE JACQUES BREL", cp: "92240", ville: "MALAKOFF", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0803", societe: "INEOS COMPOSITES FRANCE SAS", contact: "", adresse: "ZONE INDUSTRIELLE NORD", cp: "55400", ville: "ETAIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0804", societe: "INEOS POLYMERS SARRALBE", contact: "", adresse: "Rue Ernest Solvay, BP 40003", cp: "57430", ville: "Sarralbe", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0805", societe: "INERGY AUTOMOTIVE PFASTATT", contact: "", adresse: "USINE DE PFASTATT, 10 RUE DORNACH", cp: "68120", ville: "PFASTATT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0806", societe: "INGREDIA SA", contact: "", adresse: "ZI - ROUTE D'OSTREVILLE", cp: "62166", ville: "SAINT POL SUR TERNOISE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0807", societe: "INNOSPEC PERFORMANCE CHEMICALS FRANCE", contact: "", adresse: "ZONE INDUSTRIELLEBP 19", cp: "55300", ville: "HAN SUR MEUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0808", societe: "INSTITUT PASTEUR PARIS", contact: "", adresse: "25-28 RUE DU DOCTEUR ROUX", cp: "75015", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0809", societe: "INTECH MEDICAL", contact: "", adresse: "120 Rue Pasteur", cp: "83210", ville: "La Farlède", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0810", societe: "INTERNATIONAL PAPER - ESPALY", contact: "", adresse: "34 RUE DE LA BERNARDE", cp: "43009", ville: "LE PUY EN VELAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0811", societe: "IPSEN INNOVATION", contact: "", adresse: "5 Avenue du Canada", cp: "91940", ville: "Les Ulis", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0812", societe: "IRCAD", contact: "", adresse: "1 PLACE DE L'HOPITAL, BP 426", cp: "67091", ville: "STRASBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0813", societe: "ISRI FRANCE", contact: "", adresse: "RUE WILLENBACH", cp: "67250", ville: "MERKWILLER PECHELBRONN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0814", societe: "ISS FACILITY SERVICES", contact: "", adresse: "2 Rue Berthelot", cp: "92400", ville: "Courbevoie", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0815", societe: "ITON SEINE / RIVA ACIER", contact: "", adresse: "QUAI DE SEINE", cp: "78270", ville: "BONNIERES SUR SEINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0816", societe: "ITW CLUSES", contact: "", adresse: "525 AVENUE D'ITALIE", cp: "74300", ville: "CLUSES CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0817", societe: "ITW EF&C FRANCE SAS", contact: "", adresse: "4 Rue de Wittholz", cp: "67340", ville: "Ingwiller", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0818", societe: "JACOB HOLM INDUSTRIES", contact: "", adresse: "ZI HENRI SEILLER", cp: "68360", ville: "SOULTZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0819", societe: "JET LAQUE", contact: "", adresse: "5 RUE DE L'EPERVIER", cp: "67860", ville: "RHINAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0820", societe: "JTEKT COLUMN SYSTEMS (ANCIENNEMENT FUJI AUTOTECH)", contact: "", adresse: "97 RUE DU 17 NOVEMBRE", cp: "25350", ville: "MANDEURE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0821", societe: "JURAPARC", contact: "", adresse: "", cp: "39000", ville: "", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0822", societe: "JURA-TERROIR", contact: "", adresse: "3 B RUE DU VIEUX PONT", cp: "39300", ville: "PONT DU NAVOY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0823", societe: "KDDI FRANCE", contact: "", adresse: "65 RUE LEON FROT", cp: "75011", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0824", societe: "KEM ONE", contact: "", adresse: "210 AVENUE JEAN JAURES", cp: "69007", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0825", societe: "KEM ONE BALAN", contact: "", adresse: "258 ROUTE DE SAINT-MAURICE DE GOUDRANS", cp: "01360", ville: "BALAN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0826", societe: "KERMEL", contact: "Rodolphe FAYARD, rodolphe.fayard@kermel.com, 03 89 20 47 57", adresse: "20 Rue Ampère", cp: "68027", ville: "COLMAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0827", societe: "KLESIA STRATO", contact: "", adresse: "4 Rue Georges Picquart", cp: "75017", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0828", societe: "KNAUF CEILING SOLUTIONS SAS", contact: "", adresse: "67 RUE DE SALINS", cp: "25300", ville: "PONTARLIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0829", societe: "KNAUF CENTRE EST - UNGERSHEIM", contact: "Kevin DANGEL, kevin.dangel@vhl-services.fr, 06 88 92 04 58", adresse: "37 Rue d'ensisheim", cp: "68190", ville: "UNGERSHEIM", email: "", telephone: "03 88 14 67 18" },
-  { id: uid(), code: "CLI-0830", societe: "KNAUF FIBRE - 70200 LA COTE", contact: "", adresse: "14 ROUTE DE PALANTE", cp: "70200", ville: "LA COTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0831", societe: "KUHN SA (SAVERNE)", contact: "", adresse: "4 IMPASSE DES FABRIQUES", cp: "67700", ville: "SAVERNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0832", societe: "LA BANQUE POSTALE OPALE LYON", contact: "", adresse: "CENTRE FINANCIER", cp: "69007", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0833", societe: "LA BELLE ELECTRIQUE", contact: "", adresse: "ESPLANADE ANDRY FARCY", cp: "38000", ville: "GRENOBLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0834", societe: "LA FEMIS", contact: "", adresse: "6 RUE FRANCOEUR", cp: "75018", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0835", societe: "LA MAISON DU VIGNERON", contact: "", adresse: "ROUTE DE CHAMPAGNOLE, CRANCOT", cp: "39570", ville: "HAUTEROCHE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0836", societe: "LACTOVOSGES", contact: "", adresse: "718 RUE DE LA DIVISION LECLERC", cp: "88140", ville: "BULGNEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0837", societe: "LAFARGE CIMENTS", contact: "", adresse: "ROUTE DE BREAL", cp: "53410", ville: "SAINT PIERRE LA COUR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0838", societe: "LAFARGE CIMENTS LOZANNE", contact: "", adresse: "LC USINE DE VAL D'AZERGUES", cp: "69380", ville: "Lozanne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0839", societe: "L'ARTÉSIENNE", contact: "", adresse: "ZI DE L'ALOUETTE", cp: "62800", ville: "LIEVIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0840", societe: "LE BISCHENBERG SAS", contact: "", adresse: "17 RUE RAIFFEISEN", cp: "67870", ville: "BISCHOFFSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0841", societe: "LE CRYSTALYS", contact: "", adresse: "3 - 5 RUE PAUL DAUTIER", cp: "78140", ville: "VELIZY VILLACOUBLAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0842", societe: "LE MUSEE UNTERLINDEN", contact: "", adresse: "1 RUE DES UNTERLINDEN", cp: "68000", ville: "COLMAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0843", societe: "LE PROGRES CHASSIEU", contact: "", adresse: "103 AVENUE DU PROGRES", cp: "69680", ville: "CHASSIEU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0844", societe: "LE PROGRES LYON CONFLUENCE", contact: "", adresse: "4 RUE PAUL MONTROCHET", cp: "69002", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0845", societe: "LE VICINIA", contact: "", adresse: "16-18 RUE DE LONDRES", cp: "75009", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0846", societe: "LECLERC EXPRESS PHALSBOURG", contact: "", adresse: "RUE DU GLACIS", cp: "57370", ville: "PHALSBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0847", societe: "LEGENDRE ENERGIE", contact: "", adresse: "2 RUE DE LA MABILAIS", cp: "35000", ville: "RENNES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0848", societe: "LEROY MERLIN (ENTREPÔT DE COMPIÈGNE)", contact: "", adresse: "XX", cp: "XX", ville: "XX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0849", societe: "LEROY MERLIN CENTRE LOGISTIQUE DE VALENCE N°166", contact: "", adresse: "RUE DU CHAMP DU PONT", cp: "26000", ville: "VALENCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0850", societe: "LEROY MERLIN DIRECTION REGIONALE NORD OUEST ROUEN", contact: "", adresse: "8, BD FERDINANT DE LESSEPTS", cp: "76000", ville: "ROUEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0851", societe: "LEROY MERLIN LEZENNES (SIEGE SOCIAL)", contact: "", adresse: "Rond-Point Chanzy", cp: "59260", ville: "Lezennes", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0852", societe: "LEROY MERLIN N° 053 NANTES (REZÉ)", contact: "", adresse: "5, RUE ORDRONNEAU", cp: "44406", ville: "REZE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0853", societe: "LEROY MERLIN N° 055 PARIS BEAUBOURG", contact: "", adresse: "52 RUE RAMBUTEAU", cp: "75003", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0854", societe: "LEROY MERLIN N° 064 TOURVILLE (la-Rivière - Rouen)", contact: "", adresse: "Le Clos Aux Antes Centre commerciale", cp: "76410", ville: "Tourville-la-Rivière", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0855", societe: "LEROY MERLIN N° 185 MEAUX", contact: "", adresse: "ZAC DU PARC D'ACTIVITÉS DU PAYS DE MEAUX", cp: "77120", ville: "CHAUCONIN-NEUFMONTIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0856", societe: "LEROY MERLIN N°002 MELUN (SAVIGNY-LE-TEMPLE)", contact: "", adresse: "CENTRE COMMERCIAL BOISSENART", cp: "77546", ville: "SAVIGNY LE TEMPLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0857", societe: "LEROY MERLIN N°003 / MERLIMONT", contact: "", adresse: "ROUTE DE BERCK", cp: "62155", ville: "MERLIMONT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0858", societe: "LEROY MERLIN N°004 LONGUEAU", contact: "", adresse: "LA CROIX DE FER", cp: "80330", ville: "LONGUEAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0859", societe: "LEROY MERLIN N°005 RENNES SUD (CHANTEPIE)", contact: "", adresse: "PARC D'ACTIVITES DE LA PIERRE BLANCHE", cp: "35135", ville: "CHANTEPIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0860", societe: "LEROY MERLIN N°006 NICE", contact: "", adresse: "QUARTIER LINGOSTIERE", cp: "06200", ville: "NICE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0861", societe: "LEROY MERLIN N°009 DOUAI", contact: "", adresse: "CENTRE COMMERCIAL VAUBAN", cp: "59500", ville: "DOUAI", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0862", societe: "LEROY MERLIN N°010 MONTSOULT", contact: "", adresse: "11/13 ROUTE NATIONALE 1", cp: "95560", ville: "MONTSOULT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0863", societe: "LEROY MERLIN N°011 VILLENEUVE D'ASCQ", contact: "", adresse: "ZAC DE VALMY", cp: "59650", ville: "VILLENEUVE D'ASCQ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0864", societe: "LEROY MERLIN N°013 HERBLAY", contact: "", adresse: "5 RUE LOUIS ARMAND", cp: "95220", ville: "HERBLAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0865", societe: "LEROY MERLIN N°013 MONTIGNY LES CORMEILLES", contact: "", adresse: "BOULEVARD VICTOR BORDIER", cp: "95370", ville: "MONTIGNY LES CORMEILLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0866", societe: "LEROY MERLIN N°014 VALENCIENNES (LA SENTINELLE)", contact: "", adresse: "AVENUE JEAN JAURES", cp: "59174", ville: "LA SENTINELLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0867", societe: "LEROY MERLIN N°015 MONTPELLIER (ST JEAN DE VEDAS)", contact: "", adresse: "ZAC DEVES DE LA CONDAMINE C CIAL CARREFOUR", cp: "34433", ville: "ST JEAN DE VEDAS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0868", societe: "LEROY MERLIN N°016 MARNE LA VALLEE (LOGNES)", contact: "", adresse: "BOULEVARD DU SEGRAIS", cp: "77185", ville: "LOGNES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0869", societe: "LEROY MERLIN N°018 DIJON (QUETIGNY-LES-DIJON)", contact: "", adresse: "BOULEVARD DU GRAND MARCHE", cp: "21800", ville: "QUETIGNY LES DIJON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0870", societe: "LEROY MERLIN N°019 BOURGES", contact: "", adresse: "ROUTE NATIONALE 76 ROUTE D'ORLEANS", cp: "18230", ville: "SAINT DOULCHARD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0871", societe: "LEROY MERLIN N°020 ORLEANS (INGRE)", contact: "", adresse: "AVENUE GEORGES POMPIDOU", cp: "45140", ville: "INGRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0872", societe: "LEROY MERLIN N°022 BONNEUIL SUR MARNE", contact: "", adresse: "1, AVENUE DU BICENTENAIRE 1789-1989", cp: "94861", ville: "BONNEUIL SUR MARNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0873", societe: "LEROY MERLIN N°023 OSNY", contact: "", adresse: "CENTRE COMMERCIAL DE L'OSERAIE", cp: "95520", ville: "OSNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0874", societe: "LEROY MERLIN N°024 SAINTE GENEVIEVE DES BOIS", contact: "", adresse: "1 AVENUE HUREPOIX", cp: "91700", ville: "SAINTE GENEVIEVE DES BOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0875", societe: "LEROY MERLIN N°025 TOURS SUD (CHAMBRAY-LES-TOURS)", contact: "", adresse: "276 AVENUE DU GRAND SUD", cp: "37174", ville: "CHAMBRAY LES TOURS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0876", societe: "LEROY MERLIN N°026 BRON (LYON)", contact: "", adresse: "\"CENTRE COMMERCIAL \"\"\"\"PORTES DES ALPES\"", cp: "69500", ville: "BRON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0877", societe: "LEROY MERLIN N°027 LORIENT (QUEVEN)", contact: "", adresse: "ROND POINT DU MOURILLON", cp: "56530", ville: "QUEVEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0878", societe: "LEROY MERLIN N°028 LE MANS", contact: "", adresse: "ROUTE DE TOURS", cp: "72230", ville: "MULSANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0879", societe: "LEROY MERLIN N°029 CHELLES", contact: "", adresse: "151 AV GENDARME CASTERMANT RN 34", cp: "77500", ville: "CHELLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0880", societe: "LEROY MERLIN N°030 DUNKERQUE (GRANDE SYNTHE )", contact: "", adresse: "CENTRE COMMERCIAL AUCHAN RN1", cp: "59760", ville: "GRANDE SYNTHE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0881", societe: "LEROY MERLIN N°034 TOURCOING", contact: "", adresse: "\"LIEU DIT : \"\"LE PETIT MENIN\"\"\"", cp: "59960", ville: "NEUVILLE-EN-FERRAIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0882", societe: "LEROY MERLIN N°035 AVIGNON - LE PONTET", contact: "", adresse: "CENTRE COMMERCIAL AVIGNON NORD", cp: "84130", ville: "LE PONTET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0883", societe: "LEROY MERLIN N°036 CHARTRES", contact: "", adresse: "AFN C CIAL CARREFOUR", cp: "28000", ville: "CHARTRES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0884", societe: "LEROY MERLIN N°039 CHARLEVILLE-MEZIERES", contact: "", adresse: "ZAC LA CROISETTE", cp: "08000", ville: "CHARLEVILLE-MEZIERES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0885", societe: "LEROY MERLIN N°040 STRASBOURG (HAUTEPIERRE)", contact: "", adresse: "CENTRE CIAL HAUTEPIERRE", cp: "67200", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0886", societe: "LEROY MERLIN N°041 PAU", contact: "", adresse: "BD DE L'AVIATION ROUTE DE TARBES", cp: "64004", ville: "PAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0887", societe: "LEROY MERLIN N°043 BOULOGNE (ST MARTIN LES BOULOGNES)", contact: "", adresse: "CENTRE COMMERCIAL", cp: "62220", ville: "ST MARTIN LES BOULOGNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0888", societe: "LEROY MERLIN N°044 LA VIGIE (OSTWALD)", contact: "", adresse: "CENTRE COMMERCIAL LA VIGIE RN 84", cp: "67540", ville: "OSTWALD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0889", societe: "LEROY MERLIN N°046 ST BRIEUC (LANGUEUX)", contact: "", adresse: "ESPACE COMMERCIAL, BP 40", cp: "22360", ville: "LANGUEUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0890", societe: "LEROY MERLIN N°046 ST BRIEUC NE PLUS UTILISER (TERRASES ET JARDIN) (LANGEUX)", contact: "", adresse: "RUE AMBROISE PARE", cp: "22360", ville: "LANGUEUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0891", societe: "LEROY MERLIN N°047 LA VALETTE DU VAR (TOULON)", contact: "", adresse: "AVENUE DES COMMANDOS D'AFRIQUE", cp: "83160", ville: "LA VALETTE DU VAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0892", societe: "LEROY MERLIN N°048 ARRAS", contact: "", adresse: "RUE LEON FOUCAULT", cp: "62000", ville: "ARRAS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0893", societe: "LEROY MERLIN N°049 MERIGNAC", contact: "", adresse: "90, AVENUE HENRI VIGNEAU", cp: "33693", ville: "MERIGNAC", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0894", societe: "LEROY MERLIN N°050 MAUBEUGE (HAUTMONT)", contact: "", adresse: "CENTRE COMMERCIAL AUCHAN", cp: "59330", ville: "HAUTMONT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0895", societe: "LEROY MERLIN N°052 METZ (MAIZIERES LES METZ)", contact: "", adresse: "ZONE INDUSTRIELLE D'HAUCONCOURT", cp: "57280", ville: "MAIZIERES LES METZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0896", societe: "LEROY MERLIN N°054 ANGERS (ST BARTHELEMY D'ANJOU)", contact: "", adresse: "191 ROUTE D'ANGERS", cp: "49124", ville: "ST BARTHELEMY D'ANJOU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0897", societe: "LEROY MERLIN N°056 NANCY NORD (CHAMPIGNEULLES)", contact: "", adresse: "35 ROUTE DE FROUARD", cp: "54250", ville: "CHAMPIGNEULLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0898", societe: "LEROY MERLIN N°059 TOURS NORD (TOURS)", contact: "", adresse: "ZONE FUSAPARC", cp: "37022", ville: "TOURS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0899", societe: "LEROY MERLIN N°060 CAEN (MONDEVILLE)", contact: "", adresse: "ROUTE DE PARIS", cp: "14120", ville: "MONDEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0900", societe: "LEROY MERLIN N°061 MARTIGUES", contact: "", adresse: "CHEMIN DE LA BARBOUSSARDE", cp: "13500", ville: "MARTIGUES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0901", societe: "LEROY MERLIN N°062 MANTES-LA-VILLE", contact: "", adresse: "ZI LES CLOSEAUX BUCHELAY", cp: "78200", ville: "MANTES-LA-VILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0902", societe: "LEROY MERLIN N°066 CABRIES", contact: "", adresse: "CENTRE COMMERCIAL PLAN DE CAMPAGNE", cp: "13480", ville: "CABRIES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0903", societe: "LEROY MERLIN N°067 ROUEN (ISNEAUVILLE)", contact: "", adresse: "ZAC DE LA RONCE", cp: "76230", ville: "ISNEAUVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0904", societe: "LEROY MERLIN N°069 AMIENS", contact: "", adresse: "ZAC VALLE ST LADRE", cp: "80045", ville: "AMIENS CEDEX 2", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0905", societe: "LEROY MERLIN N°071 BAYONNE", contact: "", adresse: "AVENUE DU 8 MAI 1945", cp: "64100", ville: "BAYONNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0906", societe: "LEROY MERLIN N°073 LIVRY GARGAN", contact: "", adresse: "ROUTE NATIONALE N 3", cp: "93190", ville: "LIVRY GARGAN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0907", societe: "LEROY MERLIN N°074 FORBACH", contact: "", adresse: "ZI CARREFOUR DE L'EUROPE", cp: "57600", ville: "MORSBACH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0908", societe: "LEROY MERLIN N°075 BELFORT (ANDELNANS)", contact: "", adresse: "ZAC DES PRES", cp: "90400", ville: "ANDELNANS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0909", societe: "LEROY MERLIN N°076 GRAND LITTORAL (MARSEILLE)", contact: "", adresse: "CENTRE COMMERCIAL GRAND LITTORAL, BP 153", cp: "13464", ville: "MARSEILLE CEDEX 16", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0910", societe: "LEROY MERLIN N°078 COMPIEGNE SOCOBRI (JAUX)", contact: "", adresse: "LA FLECHE", cp: "60880", ville: "JAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0911", societe: "LEROY MERLIN N°080 NIMES", contact: "", adresse: "230 AV JEAN PROUVE", cp: "30942", ville: "NIMES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0912", societe: "LEROY MERLIN N°100 ST ETIENNE STEEL", contact: "", adresse: "Centre commercial Steel", cp: "42000", ville: "SAINT-ETIENNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0913", societe: "LEROY MERLIN N°101 VILLENEUVE LES BEZIERS", contact: "", adresse: "avenue Jean Monnet La Méridienne ZAC", cp: "34420", ville: "Villeneuve-lès-Béziers", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0914", societe: "LEROY MERLIN N°110 TOULOUSE BALMA", contact: "", adresse: "AVENUE JEAN-RENE LAGASSE", cp: "31130", ville: "BALMA CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0915", societe: "LEROY MERLIN N°111 COLOMIERS", contact: "", adresse: "ZAC DU PERGET", cp: "31770", ville: "COLOMIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0916", societe: "LEROY MERLIN N°112 CHATEAUROUX", contact: "", adresse: "ROUTE DE LA CHÂTRE, BP 29", cp: "36001", ville: "CHATEAUROUX CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0917", societe: "LEROY MERLIN N°115 SAINT DENIS", contact: "", adresse: "QUARTIER STADE DE FRANCE", cp: "93218", ville: "SAINT DENIS LA PLAINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0918", societe: "LEROY MERLIN N°116 TORCY COLLEGIEN (COLLEGIEN)", contact: "", adresse: "2 AVENUE DU GENERAL DE GAULLE", cp: "77090", ville: "COLLEGIEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0919", societe: "LEROY MERLIN N°117 TASSIN", contact: "", adresse: "12 AVENUE VICTOR HUGO", cp: "69160", ville: "TASSIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0920", societe: "LEROY MERLIN N°119 LA VALENTINE (MARSEILLE)", contact: "", adresse: "ZA DE LA RAVELLE", cp: "13396", ville: "MARSEILLE CEDEX 11", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0921", societe: "LEROY MERLIN N°12 / LENS", contact: "", adresse: "CENTRE COMMERCIAL LENS 2", cp: "62880", ville: "VENDIN-LE-VIEL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0922", societe: "LEROY MERLIN N°122 HENIN BEAUMONT (DOURGES)", contact: "", adresse: "CENTRE LOGISTIQUE NORD, PLATEFORME DELTA 3 DOURGES", cp: "62119", ville: "DOURGES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0923", societe: "LEROY MERLIN N°130 NANCY SUD (HOUDEMONT)", contact: "", adresse: "ZAC DE FROCOURT", cp: "54180", ville: "HOUDEMONT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0924", societe: "LEROY MERLIN N°131 VENDENHEIM", contact: "", adresse: "5 RUE DU COMMERCE", cp: "67550", ville: "VENDENHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0925", societe: "LEROY MERLIN N°132 HAGUENAU", contact: "", adresse: "1 RUE DU KESTLERHOF", cp: "67500", ville: "HAGUENAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0926", societe: "LEROY MERLIN N°133 CLERMONT-FERRAND", contact: "", adresse: "BOULEVARD SAINT JEAN", cp: "63100", ville: "CLERMONT FERRAND", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0927", societe: "LEROY MERLIN N°135 MACON", contact: "", adresse: "448 RUE JACQUARD", cp: "71000", ville: "MACON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0928", societe: "LEROY MERLIN N°137 VALLAURIS", contact: "", adresse: "CHEMIN DES FUGUIERES", cp: "06220", ville: "VALLAURIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0929", societe: "LEROY MERLIN N°138 LAVAL (ST BERTHEVIN)", contact: "", adresse: "57 BD LOUIS ARMAND", cp: "53940", ville: "ST BERTHEVIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0930", societe: "LEROY MERLIN N°139 PUILBOREAU LA ROCHELLE", contact: "", adresse: "1 RUE DE BELGIQUE - LA ROCHELLE", cp: "17138", ville: "PUILBOREAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0931", societe: "LEROY MERLIN N°140 AUBAGNE", contact: "", adresse: "Avenue de la Baumone", cp: "13400", ville: "Aubagne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0932", societe: "LEROY MERLIN N°142 IVRY-SUR-SEINE", contact: "", adresse: "2 À 12, RUE FRANÇOIS MITTERRAND", cp: "94200", ville: "IVRY-SUR-SEINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0933", societe: "LEROY MERLIN N°143 BOIS D'ARCY", contact: "", adresse: "ZAC DE LA CROIX BONNET, RUE FRITZLANG", cp: "78390", ville: "BOIS D'ARCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0934", societe: "LEROY MERLIN N°144 REIMS NORD (REIMS)", contact: "", adresse: "ZAC LA NEUVILETTE, BP 1271", cp: "51100", ville: "REIMS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0935", societe: "LEROY MERLIN N°145 METZ TECHNOPOLE", contact: "", adresse: "METZ TECHNOPOLE", cp: "57070", ville: "METZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0936", societe: "LEROY MERLIN N°146 VANNES (THEIX)", contact: "", adresse: "ZA DE ST LEONARD", cp: "56450", ville: "THEIX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0937", societe: "LEROY MERLIN N°147 RENNES NORD (BETTON)", contact: "", adresse: "ZAC DE PLUVIGNON", cp: "35830", ville: "BETTON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0938", societe: "LEROY MERLIN N°148 DREUX (VERNOUILLET)", contact: "", adresse: "CENTRE COMMERCIAL PLEIN SUD", cp: "28500", ville: "VERNOUILLET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0939", societe: "LEROY MERLIN N°150 ROQUES SUR GARONNE", contact: "", adresse: "ALLEE DE FRAIXINET", cp: "31120", ville: "ROQUES SUR GARONNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0940", societe: "LEROY MERLIN N°151 BOULIAC", contact: "", adresse: "C CIAL AUCHAN, RUE DE LA GABARRE", cp: "33270", ville: "BOULIAC", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0941", societe: "LEROY MERLIN N°152 ST CHAMOND (ENSEIGNE TRIDOME)", contact: "", adresse: "ROUTE DU 17 OCTOBRE 1961", cp: "42400", ville: "ST CHAMOND", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0942", societe: "LEROY MERLIN N°153 ST AUNES", contact: "", adresse: "ZAC ST ANTOINE", cp: "34130", ville: "ST AUNES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0943", societe: "LEROY MERLIN N°154 ANNEMASSE (CRANVES-SALES)", contact: "", adresse: "ZA VILLE-LA-GRAND, BP 289", cp: "74100", ville: "VILLE-LA-GRAND", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0944", societe: "LEROY MERLIN N°155 PERIGUEUX (CHANCELADE)", contact: "", adresse: "\"LIEU DIT \"\"LES GABARRES\"\"\"", cp: "24650", ville: "CHANCELADE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0945", societe: "LEROY MERLIN N°156 GRADIGNAN", contact: "", adresse: "AVENUE DE L'HIPPODROME", cp: "33170", ville: "GRADIGNAN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0946", societe: "LEROY MERLIN N°158 RIVESALTES", contact: "", adresse: "CENTRE COMMERCIAL CAP ROUSSILLON", cp: "66600", ville: "RIVESALTES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0947", societe: "LEROY MERLIN N°159 CALAIS", contact: "", adresse: "CENTRE COMMERCIAL AUCHAN", cp: "62100", ville: "CALAIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0948", societe: "LEROY MERLIN N°160 LA ROCHE SUR YON", contact: "", adresse: "ZAC LA ROCHE SUD", cp: "85000", ville: "LA ROCHE SUR YON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0949", societe: "LEROY MERLIN N°161 RUEIL MALMAISON", contact: "", adresse: "CENTRE COMMERCIAL LES HAUTS DE RUEIL, BP 40211", cp: "92502", ville: "RUEIL MALMAISON CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0950", societe: "LEROY MERLIN N°162 BESANCON", contact: "", adresse: "RUE GUILLAUME APOLLINAIRE", cp: "25000", ville: "BESANCON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0951", societe: "LEROY MERLIN N°163 CESSON (MELUN)", contact: "", adresse: "ZAC DE LA PLAINE DES MOULINS A VENTS", cp: "77240", ville: "CESSON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0952", societe: "LEROY MERLIN N°164 BETHUNE (VERQUIN)", contact: "", adresse: "RUE JEAN JAURES", cp: "62131", ville: "VERQUIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0953", societe: "LEROY MERLIN N°165 / ANGOULEME", contact: "", adresse: "ZAC LES EFFAMIERS, RD 939", cp: "16800", ville: "SOYAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0954", societe: "LEROY MERLIN N°166 VALENCE", contact: "", adresse: "QUARTIER LA MOTTE MAUBOULLE", cp: "26000", ville: "VALENCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0955", societe: "LEROY MERLIN N°167 THOIRY", contact: "", adresse: "CENTRE COMMERCIAL DU VAL THOIRY", cp: "01710", ville: "THOIRY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0956", societe: "LEROY MERLIN N°168 SAINT ETIENNE", contact: "", adresse: "AV PIERRE MENDES FRANCE", cp: "42270", ville: "ST PRIEST EN JAREZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0957", societe: "LEROY MERLIN N°171 PERPIGNAN", contact: "", adresse: "CENTRE COMMERCIAL AUCHAN, ROUTE D'Espagne", cp: "66000", ville: "PERPIGNAN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0958", societe: "LEROY MERLIN N°172 GONESSE", contact: "", adresse: "1 ROND POINT DE LA CROIX ST BENOIT", cp: "95500", ville: "GONESSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0959", societe: "LEROY MERLIN N°173 / BIGANOS", contact: "", adresse: "\"LIEU DIT \"\" LE MOULIN DE LA CASSADOTTE \"\"\"", cp: "33380", ville: "BIGANOS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0960", societe: "LEROY MERLIN N°174 CHOLET", contact: "", adresse: "BOULEVARD CASSINI", cp: "49300", ville: "CHOLET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0961", societe: "LEROY MERLIN N°175 / BRIVE LA GAILLARDE", contact: "", adresse: "ZAC DU MOULIN", cp: "19360", ville: "MALEMORT-SUR-CORREZE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0962", societe: "LEROY MERLIN N°176 / AGEN", contact: "", adresse: "ZAC LAMOTHE MAGNAC", cp: "45550", ville: "BOE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0963", societe: "LEROY MERLIN N°177 ANNECY EPAGNY", contact: "", adresse: "358 RUE DE CLOSON", cp: "74330", ville: "EPAGNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0964", societe: "LEROY MERLIN N°178 DINARD", contact: "", adresse: "CAP EMERAUDE", cp: "35730", ville: "PLEURTUIT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0965", societe: "LEROY MERLIN N°179 CHERBOURG", contact: "", adresse: "ZAC CLAUDE CHAPPE, RD 352E", cp: "50470", ville: "TOLLEVAST", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0966", societe: "LEROY MERLIN N°180 NANTERRE", contact: "", adresse: "140 RUE DE SARTROUVILLE", cp: "92000", ville: "NANTERRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0967", societe: "LEROY MERLIN N°182 / PARIS DAUMESNIL", contact: "", adresse: "139 AVENUE DAUMESNIL", cp: "75012", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0968", societe: "LEROY MERLIN N°183 DOUAI 2", contact: "", adresse: "AV DU COMMERCE ET DE L'ARTISANAT", cp: "59119", ville: "WAZIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0969", societe: "LEROY MERLIN N°184 MONTIVILLIERS LE HAVRE", contact: "", adresse: "5 RUE GINKGO BILOBA", cp: "76290", ville: "MONTIVILLIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0970", societe: "LEROY MERLIN N°187 BLOIS", contact: "", adresse: "22 RUE DU BOUT DES HAIES", cp: "41000", ville: "BLOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0971", societe: "LEROY MERLIN N°188 BUCHELAY", contact: "", adresse: "232 AVENUE DU BEARN", cp: "78200", ville: "BUCHELAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0972", societe: "LEROY MERLIN N°189 MONTAUBAN", contact: "", adresse: "400 BD D'OCCITANIE", cp: "82000", ville: "MONTAUBAN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0973", societe: "LEROY MERLIN N°191 BEAUVAIS", contact: "", adresse: "RUE JEAN BAPTISTE GODIN", cp: "60000", ville: "BEAUVAIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0974", societe: "LEROY MERLIN N°192 PUGET-FREJUS", contact: "", adresse: "BD JEAN MOULIN", cp: "83480", ville: "PUGET SUR ARGENS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0975", societe: "LEROY MERLIN N°194 GRENOBLE 2 (ST EGREVE)", contact: "", adresse: "14 RUE LOUIS BESANCON", cp: "38120", ville: "ST EGREVE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0976", societe: "LEROY MERLIN N°196 / PARIS LA MADELEINE", contact: "", adresse: "25/27 PLACE DE LA MADELEINE", cp: "75008", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0977", societe: "LEROY MERLIN N°197 MUNDOLSHEIM", contact: "", adresse: "Boulevard des Enseignes", cp: "67450", ville: "Mundolsheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0978", societe: "LEROY MERLIN N°205 / BATIGNOLLES", contact: "", adresse: "CENTRE COMMERCIAL CARDINET", cp: "75017", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0979", societe: "LEROY MERLIN N°21 / VITRY SUR SEINE", contact: "", adresse: "52 BOULEVARD STALINGRAD", cp: "94408", ville: "VITRY SUR SEINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0980", societe: "LEROY MERLIN N°297 GUERANDE", contact: "", adresse: "CENTRE COMMERCIAL LES SALINES", cp: "44350", ville: "GUERANDE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0981", societe: "LEROY MERLIN N°32/ LESQUIN", contact: "", adresse: "RUE DE DOUAI", cp: "59810", ville: "LESQUIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0982", societe: "LEROY MERLIN N°37/ BORDEAUX LE LAC", contact: "", adresse: "AVENUE DES 40 JOURNAUX", cp: "33300", ville: "BORDEAUX LE LAC", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0983", societe: "LEROY MERLIN N°45 / MASSY", contact: "", adresse: "Z.I DE LA BONDE", cp: "91300", ville: "MASSY PALAISEAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0984", societe: "LEROY MERLIN N°461 - ENTREPOT ID LOGISTIC / SAINT QUENTIN FALLAVIER", contact: "", adresse: "15 RUE LUZAIS", cp: "38070", ville: "SAINT QUENTIN FALLAVIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0985", societe: "LEROY MERLIN N°51 POITIERS", contact: "", adresse: "ROUTE NATIONALE 10 - BP 51", cp: "86360", ville: "CHASSENEUIL-DU-POITOU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0986", societe: "LEROY MERLIN N°63 ROSNY SOUS BOIS", contact: "", adresse: "7 RUE DE LISBONNE", cp: "93110", ville: "ROSNY SOUS BOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0987", societe: "LEROY MERLIN N°72 / GENNEVILLIERS", contact: "", adresse: "CHEMIN DES RENIERS", cp: "92230", ville: "GENNEVILLIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0988", societe: "LEROY MERLIN N°77 / BRIE COMTE ROBERT", contact: "", adresse: "PARC D'ACTIVITES DE TUBOEUF", cp: "77170", ville: "BRIE COMTE ROBERT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0989", societe: "LEROY MERLIN N°85 VENISSIEUX", contact: "", adresse: "1 Rue Simone Veil", cp: "69200", ville: "Vénissieux", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0990", societe: "LEROY MERLIN N°88 ALBI", contact: "", adresse: "AVENUE DE SAINT JUERY", cp: "81000", ville: "ALBI", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0991", societe: "LEROY MERLIN N°89 ST OUEN", contact: "", adresse: "9 Rue Ardoin", cp: "93400", ville: "St.-Ouen", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0992", societe: "LEROY MERLIN PARIS 19E", contact: "", adresse: "159 Bd Macdonald", cp: "75019", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0993", societe: "LEROY MERLIN PLATEFORME LOGISTIQUE DE SAINT OUEN N°136", contact: "", adresse: "ENTREPOT LOGISTIQUE", cp: "93400", ville: "SAINT OUEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0994", societe: "LEROY MERLIN VOURLES N°169", contact: "", adresse: "LES 7 CHEMINS", cp: "69390", ville: "VOURLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0995", societe: "LEROY SOMER", contact: "", adresse: "1 RUE DE LA BRUELLE", cp: "45800", ville: "SAINT JEAN DE BRAYE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0996", societe: "LES EAUX EVIAN", contact: "", adresse: "USINE AMPHION BP 609", cp: "74506", ville: "EVIAN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0997", societe: "LES ELEVEURS DE LA CHEVILLOTTE", contact: "", adresse: "23 RUE DES BANARDES", cp: "25800", ville: "VALDAHON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0998", societe: "LES GRANDS CHAIS DE FRANCE", contact: "", adresse: "1 RUE DE LA DIVISION LECLERC", cp: "67290", ville: "PETERSBACH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-0999", societe: "LES JUS DE FRUITS D'ALSACE", contact: "", adresse: "RUE DE RIMSDORF", cp: "67260", ville: "SARRE UNION", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1000", societe: "LES ZELLES", contact: "", adresse: "30 RUE DU HOHNECK, ZI ECORCES", cp: "88250", ville: "LA BRESSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1001", societe: "LHOIST - STE DES FOURS A CHAUX DE SORCY", contact: "", adresse: "SOCIETE DES FOURS A CHAUX DE SORCY, BP 16", cp: "55190", ville: "VOID VACON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1002", societe: "LIDL CENTRE DES SERVICES ADMINISTRATIFS - SIEGE A", contact: "", adresse: "35 RUE CHARLES PÉGUY", cp: "67200", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1003", societe: "LIEBHERR COMPONENTS (COC)", contact: "", adresse: "43 RUE FREDERIC HARTMANN", cp: "68025", ville: "COLMAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1004", societe: "LIEBHERR FRANCE (LFR)", contact: "", adresse: "2 Avenue Joseph Rey", cp: "68000", ville: "Colmar", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1005", societe: "LIEBHERR MINNING (LEC)", contact: "Yves KIENLEN, Yves.KIENLEN@eiffage.com, 06 14 92 38 35", adresse: "49 RUE FREDERIC HARTMANN", cp: "68025", ville: "COLMAR CEDEX", email: "", telephone: "03 89 24 65 13" },
-  { id: uid(), code: "CLI-1006", societe: "LIGN ALPES", contact: "", adresse: "25 PLACE SAINT MAURICE", cp: "74800", ville: "ST PIERRE EN FAUCIGNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1007", societe: "LILLY FRANCE", contact: "", adresse: "Z A 2 RUE COLONEL LILLY, BP 70419 FEGERSHEIM", cp: "64412", ville: "ILLKIRCH CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1008", societe: "LIMAGRAIN / GERZAT", contact: "", adresse: "RUE HENRI MONDOR", cp: "63360", ville: "ST BEAUZIRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1009", societe: "LISI AUTOMOTIVE FORMER (DASLE)", contact: "", adresse: "1 RUE CENTRALE", cp: "25230", ville: "DASLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1010", societe: "LOG FOR YOU - PLATEFORME LOGISTIQUE", contact: "", adresse: "Avenue de la Condamine", cp: "26000", ville: "Valence", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1011", societe: "LOGIL (Anciennement SETRALOG)", contact: "", adresse: "285 RUE GUY MOLLET, BP 80", cp: "62246", ville: "NOYELLES SOUS LENS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1012", societe: "LOHR INDUSTRIE", contact: "", adresse: "ZONE INDUSTRIELLE", cp: "67120", ville: "DUPPIGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1013", societe: "LOSBERGER SAS", contact: "", adresse: "1 Rue du Bruch", cp: "67170", ville: "Brumath", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1014", societe: "LP ENERGIES", contact: "", adresse: "37 Boulevard Kelsch", cp: "88400", ville: "Gérardmer", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1015", societe: "LYCEE CAMILLE SAINT SAENS", contact: "", adresse: "18 RUE GUYNEMER", cp: "95170", ville: "DEUIL LA BARRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1016", societe: "LYCEE DES METIERS PAUL EMILE VICTOR", contact: "", adresse: "1 AVENUE DE GAIL", cp: "67210", ville: "OBERNAI", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1017", societe: "LYCEE POLYVALENT LES LOMBARDS /10 TROYES", contact: "", adresse: "12 Avenue des Lombards", cp: "10000", ville: "Troyes", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1018", societe: "LYCEE RENE CASSIN", contact: "", adresse: "7 AVENUE FRANCOIS MITTERAND", cp: "95000", ville: "GONESSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1019", societe: "MAFLOW / CHARTRES", contact: "", adresse: "2 AVENUE GUSTAVE EIFFEL", cp: "28011", ville: "CHARTRES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1020", societe: "MAGNA LORRAINE EMBOUTISSAGE", contact: "", adresse: "Mégazone Départementale", cp: "57450", ville: "Henriville", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1021", societe: "MAGRI", contact: "", adresse: "Rue de Pannecières", cp: "45300", ville: "Thignonville", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1022", societe: "MAINE MONTPARNASSE / PARIS 15", contact: "", adresse: "47 RUE DE VAUGIRARD", cp: "75015", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1023", societe: "MAIRIE DE CHAMPS - POSTE DES DEUX PARCS", contact: "", adresse: "Cours des Deux Parcs", cp: "77186", ville: "Champs-sur-Marne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1024", societe: "MAIRIE DE CHAMPS - POSTE NYMPHES", contact: "", adresse: "Allée de la Lisière", cp: "77420", ville: "Champs-sur-Marne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1025", societe: "MAIRIE DE CHAMPS / GS PICASSO – POSTE EUGENE SUE", contact: "", adresse: "Allée des Noyers", cp: "77420", ville: "Champs-sur-Marne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1026", societe: "MAIRIE DE CHAMPS / GYMNASE PYRAMIDE - POSTE GRADINS", contact: "", adresse: "Allée des Champs", cp: "77420", ville: "Champs-sur-Marne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1027", societe: "MAIRIE DE CHAMPS SUR MARNE", contact: "", adresse: "BP1", cp: "77420", ville: "CHAMPS SUR MARNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1028", societe: "MAIRIE DE LUNEVILLE", contact: "", adresse: "2 PLACE SAINT-REMY", cp: "54300", ville: "LUNEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1029", societe: "MAIRIE D'ENGHIEN LES BAINS", contact: "", adresse: "57 RUE DU GENERAL DE GAULLE", cp: "95880", ville: "ENGHIEN LES BAINS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1030", societe: "MAIRIE D'OSTWALD", contact: "", adresse: "3 RUE ALBERT GERIG", cp: "67540", ville: "OSTWALD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1031", societe: "MAISON DE LA CULTURE MC2", contact: "", adresse: "4 RUE PAUL CHAUDEL", cp: "38100", ville: "GRENOBLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1032", societe: "MAISON FRANCOIS CHOLAT", contact: "", adresse: "1310 ROUTE DE THUILE", cp: "38510", ville: "MORESTEL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1033", societe: "MAITRES LAITIERS DU COTENTIN / CARENTAN", contact: "", adresse: "Route Américaine", cp: "50500", ville: "Carentan-les-Marais", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1034", societe: "MAITRES LAITIERS DU COTENTIN / SOTTEVAST", contact: "", adresse: "8 ROUTE DE VALOGNES", cp: "50260", ville: "SOTTEVAST", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1035", societe: "MALERBA", contact: "", adresse: "Impasse Reclaine", cp: "69240", ville: "Thizy-les-Bourgs", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1036", societe: "MANUFACTURE FRANCAISE DES PNEUMATIQUES MICHELIN", contact: "", adresse: "USINE MICHELIN D'EPINAL", cp: "88192", ville: "GOLBEY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1037", societe: "MARGARITELLI", contact: "", adresse: "ROUTE NATIONALE 6", cp: "71150", ville: "FONTAINES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1038", societe: "MARIGNY ET JOLY", contact: "", adresse: "CHEMIN DES ANZACS", cp: "62450", ville: "BAPAUME", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1039", societe: "MARS CHOCOLAT FRANCE HAGUENAU", contact: "", adresse: "SITE DE HAGUENAU, 3 CHEMIN DE LA SANDLACH, BP 10036", cp: "67501", ville: "HAGUENAU CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1040", societe: "MARS CHOCOLAT FRANCE STEINBOURG", contact: "", adresse: "ETABLISSEMENT DE STEINBOURG, ROUTE DE SAVERNE", cp: "67790", ville: "STEINBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1041", societe: "MARS PF FRANCE ERNOLSHEIM / BRUCHE", contact: "", adresse: "AVENUE DE LA CONCORDE, ERNOLSHEIM SUR BRUCHE", cp: "67129", ville: "MOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1042", societe: "MASSILLY FRANCE", contact: "", adresse: "Rue Pierre Bindschedler", cp: "71250", ville: "Massilly", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1043", societe: "MAURER KINGERSHEIM", contact: "", adresse: "12 RUE DE L'INDUSTRIE", cp: "68260", ville: "KINGERSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1044", societe: "MEDIOMATRIX", contact: "", adresse: "1 RUE DU JARDIN D'ECOSSE", cp: "57530", ville: "PELTRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1045", societe: "MEDIPOLE DE SAVOIE", contact: "", adresse: "300 AVENUE DES MASSETTES", cp: "73190", ville: "CHALLES LES EAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1046", societe: "MEPHISTO SARREBOURG", contact: "", adresse: "RUE DE SARREGUEMINES", cp: "57400", ville: "SARREBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1047", societe: "MERCK / MEYZIEU", contact: "", adresse: "10 Avenue du Maréchal de Lattre de Tassigny", cp: "69330", ville: "Meyzieu", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1048", societe: "MERCK MILLIPORE", contact: "", adresse: "39 Route industrielle de la Hardt", cp: "67120", ville: "MOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1049", societe: "MERSEN", contact: "", adresse: "1 RUE JULES FERRY", cp: "54530", ville: "PAGNY-SUR-MOSELLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1050", societe: "MESSIER BUGATTI ET MESSIER SERVICE", contact: "", adresse: "3 RUE ANTOINE DE SAINT EXUPERY, BP 110", cp: "67124", ville: "MOLSHEIM CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1051", societe: "METAUX SPECIAUX - MSSA", contact: "", adresse: "111 RUE DE LA VOLTA", cp: "73600", ville: "SAINT MARCEL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1052", societe: "METEO FRANCE DIRECTION DES SYSTEMES D'OBERSERVATION", contact: "", adresse: "DIRECTION DES SYSTEMES D'OBSERVATION, 42 AVENUE GASPARD CORIOLIS", cp: "31057", ville: "TOULOUSE CEDEX 1", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1053", societe: "METHAGRI AMANVILLERS", contact: "", adresse: "FERME CHAMPENOIS", cp: "57865", ville: "AMANVILLERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1054", societe: "MG SERVICES NORD", contact: "", adresse: "Zone d'Activités des Escardalles, CELLULE N°3 - VOIE PAUL HOCHART", cp: "62129", ville: "SAINT AUGUSTIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1055", societe: "MGP MUTUELLE", contact: "", adresse: "8 RUE THOMAS EDISON", cp: "94000", ville: "CRETEIL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1056", societe: "MIKROS", contact: "", adresse: "8-10 RUE DU RENARD", cp: "75004", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1057", societe: "MINISTERE DE L'ECOLOGIE", contact: "", adresse: "244 BOULEVARD SAINT GERMAIN", cp: "75007", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1058", societe: "MINISTERE DE L'INTERIEUR", contact: "", adresse: "BATIMENT LUMIERE", cp: "75012", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1059", societe: "MLA ENERGY", contact: "", adresse: "ZA LES LANDES", cp: "31850", ville: "MONDOUZIL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1060", societe: "MONDELEZ FRANCE BISCUITS SAS", contact: "", adresse: "Rue Albert Thomas", cp: "25000", ville: "Besançon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1061", societe: "MONOPRIX", contact: "", adresse: "25 Rue Gambetta", cp: "78200", ville: "MANTES LA JOLIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1062", societe: "MONOPRIX LA GUILLOTIERE MAG 22", contact: "", adresse: "305 Rue Garibaldi", cp: "69007", ville: "Lyon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1063", societe: "MORGAN STANLEY", contact: "", adresse: "61 RUE DE MONCEAU", cp: "75008", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1064", societe: "MOTHERSON", contact: "", adresse: "Rue Léon Duhamel", cp: "62440", ville: "Harnes", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1065", societe: "MOULIN MECKERT-DIEMER", contact: "", adresse: "101 RUE DE WINGERSHEIM", cp: "67170", ville: "KRAUTWILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1066", societe: "MSD ALLFLEX EUROPE SA", contact: "", adresse: "35 RUE DES EAUX", cp: "35500", ville: "VITRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1067", societe: "MTO - EUROGEM GROUPE ATALIAN", contact: "", adresse: "111-113 QUAI JULES GUESDE", cp: "94400", ville: "VITRY SUR SEINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1068", societe: "MTO ATALIAN AGENCE NORD", contact: "", adresse: "19 ZAC DE L'EUROPE", cp: "59310", ville: "ORCHIES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1069", societe: "MTO EUROGEM - ATALIAN / PALAISEAU", contact: "", adresse: "2 RUE AMBROISE CROIZAT", cp: "91120", ville: "PALAISEAU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1070", societe: "MTO-EUROGEM ATALIAN MEYZIEU", contact: "", adresse: "ZAC DES GAULNES", cp: "69330", ville: "MEYZIEU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1071", societe: "MULTIDEX", contact: "", adresse: "125 AVENUE LOUIS ROCHE", cp: "92622", ville: "GENNEVILLIERS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1072", societe: "MULTIDEX", contact: "", adresse: "BATIMENT D", cp: "92500", ville: "RUEIL MALMAISON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1073", societe: "MUSEE DU LOUVRE / PARIS", contact: "", adresse: "rue de Rivoli", cp: "75001", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1074", societe: "NATIONAL AUSTRALIA BANK", contact: "", adresse: "24 RUE DES CAPUCINES", cp: "75002", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1075", societe: "NE.ST / COURBEVOIE", contact: "", adresse: "51 RUE LOUIS BLANC", cp: "92400", ville: "COURBEVOIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1076", societe: "NEO COLOR", contact: "", adresse: "1 CHEMIN BRUCHELMATT", cp: "67140", ville: "GERTWILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1077", societe: "NESTLE PURINA PETCARE", contact: "", adresse: "RUE DE L'EUROPE", cp: "80800", ville: "AUBIGNY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1078", societe: "NEXTER MUNITION / LA CHAPELLE SAINT URSIN", contact: "HUARD Sébastien Responsable énergie et maintenance, Mobile +33 (0)6 46 40 98 62, sebastien.huard@sodexo.com", adresse: "CHEMIN DE VILLENEUVE", cp: "18570", ville: "LA CHAPELLE SAINT URSIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1079", societe: "NEXTER SYSTEMS SATORY / VERSAILLES", contact: "M. RAU ALEXANDRU, alexandru.rau@sodexo.com, 06 26 45 49 78", adresse: "14 ROUTE DE LA MINIERE", cp: "78000", ville: "VERSAILLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1080", societe: "NLMK EUROPE", contact: "", adresse: "1 RUE DU BASSIN DE L'INDUSTRIE", cp: "67016", ville: "STRASBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1081", societe: "NORDEX FRANCE", contact: "", adresse: "SERVICE DEPARTEMENTAL SP224, 2 RUE LOUIS LUMIERE", cp: "57690", ville: "CRÉHANGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1082", societe: "NORSKE SKOG", contact: "", adresse: "ROUTE JEAN CHARLES PELLERIN", cp: "88194", ville: "GOLBEY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1083", societe: "NOVACARB", contact: "", adresse: "34 RUE GILBERT BIZE", cp: "54410", ville: "LANEUVEVILLE DEVANT NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1084", societe: "NOVACYL SITE DE ROUSSILLON", contact: "", adresse: "RUE GASTON MONMOUSSEAU", cp: "38150", ville: "ROUSSILLON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1085", societe: "NOVERGIE SAUSHEIM", contact: "", adresse: "1 ROUTE DE CHALAMPE", cp: "68391", ville: "SAUSHEIM CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1086", societe: "NOVOTEL / MONTPELLIER", contact: "", adresse: "", cp: "34000", ville: "MONTPELLIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1087", societe: "OBER", contact: "", adresse: "Longeville en Barrois", cp: "55014", ville: "BAR-LE-DUC cedex", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1088", societe: "OCDE BOULOGNE", contact: "", adresse: "46 QUAI ALPHONSE LE GALLO", cp: "92100", ville: "BOULOGNE-BILLANCOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1089", societe: "OCDE LE CHATEAU", contact: "", adresse: "CENTRE DE CONFERENCE", cp: "75775", ville: "PARIS CEDEX 16", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1090", societe: "ODDO", contact: "", adresse: "12 BOULEVARD DE LA MADELEINE", cp: "75009", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1091", societe: "OI MANUFACTURING FRANCE", contact: "", adresse: "64 BD DU 11 NOVEMBRE", cp: "69611", ville: "VILLEURBANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1092", societe: "OMMIC SAS", contact: "", adresse: "2 Rue du Moulin", cp: "94450", ville: "LIMEIL-BREVANNES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1093", societe: "OPERA GARNIER", contact: "", adresse: "8 RUE SCRIBE", cp: "75009", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1094", societe: "ORANGE CAMPUS LUMIERE LYON", contact: "", adresse: "131 Avenue Félix Faure", cp: "69003", ville: "Lyon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1095", societe: "ORGAPHARM / PITHIVIERS", contact: "", adresse: "25 Rue du Moulin de la Canne", cp: "45300", ville: "Pithiviers", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1096", societe: "OSIRIS", contact: "", adresse: "RUE GASTON MONTMOUSSEAU", cp: "38556", ville: "SAINT MAURICE L'EXIL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1097", societe: "OTT IMPRIMERIE", contact: "", adresse: "9 Rue des Pins", cp: "67310", ville: "Wasselonne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1098", societe: "OUTILS WOLF", contact: "", adresse: "5 RUE DE L INDUSTRIE", cp: "67160", ville: "WISSEMBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1099", societe: "PAPETERIE CLAIREFONTAINE", contact: "", adresse: "19 RUE DE L'ABBAYE", cp: "88480", ville: "ETIVAL CLAIREFONTAINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1100", societe: "PAPETERIE DE MANDEURE", contact: "", adresse: "14 RUE DE LA PAPETERIE", cp: "25350", ville: "MANDEURE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1101", societe: "PAPETERIE DES VOSGES - PDV", contact: "", adresse: "34 Rue Maurice Mougeot", cp: "88600", ville: "LAVAL SUR VOLOGNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1102", societe: "PAPETERIE ROSSMANN", contact: "", adresse: "6 RUE DU MOULIN", cp: "68160", ville: "SAINTE-CROIX-AUX-MINES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1103", societe: "PAPETERIE UPM KYMMENE DOCELLES", contact: "", adresse: "1 RUE DE GRAND MEIX", cp: "88460", ville: "DOCELLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1104", societe: "PAPETERIE ZUBER RIEDER", contact: "", adresse: "RUE ERNEST ZUBER", cp: "25320", ville: "BOUSSIERES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1105", societe: "PAPETERIES DU LEMAN", contact: "", adresse: "1080 RUE DES VIGNES-ROUGES", cp: "74500", ville: "PUBLIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1106", societe: "PAPETERIES DU RHIN", contact: "", adresse: "1 RUE HENRI DE CROUSAZ", cp: "68110", ville: "ILLZACH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1107", societe: "PARC DES EXPOSITIONS STRASBOURG", contact: "", adresse: "Rue Fritz Kieffer", cp: "67000", ville: "Strasbourg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1108", societe: "PARC ICADE - RUNGIS - BAT DUBLIN", contact: "", adresse: "2 PLACE GUSTAVE EIFFEL", cp: "94150", ville: "RUNGIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1109", societe: "PARLEMENT EUROPEEN STRASBOURG", contact: "", adresse: "ALL. DU PRINTEMPS", cp: "67070", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1110", societe: "PATHE 69", contact: "", adresse: "", cp: "69000", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1111", societe: "PERNAT EMILE SA", contact: "", adresse: "375 RUE DES TECHNIQUES", cp: "74970", ville: "MARIGNIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1112", societe: "PETROINEOS / MARTIGUES", contact: "", adresse: "Route de la Raffinerie", cp: "13117", ville: "Martigues", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1113", societe: "PETZL CROLLES", contact: "", adresse: "RUE FERNAND PETZL", cp: "38920", ville: "CROLLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1114", societe: "PETZL EYBENS", contact: "", adresse: "13 RUE IRENE JOLIOT CURIE", cp: "38320", ville: "EYBENS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1115", societe: "PETZL ROTHERENS", contact: "", adresse: "ZAC DU HERON", cp: "73110", ville: "ROTHERENS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1116", societe: "PEUGEOT MOTOCYCLES", contact: "", adresse: "103 RUE DU 17 NOVEMBRE", cp: "25350", ville: "MANDEURE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1117", societe: "PHISEO", contact: "", adresse: "6BIS, RUE GEORGES POLOSSAT", cp: "69720", ville: "SIANT LAURENT DE MURE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1118", societe: "PIC DE HOLTZHEIM", contact: "", adresse: "3 RUE CHARLES EHRET", cp: "67810", ville: "HOLTZHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1119", societe: "PILOT CORPORATION OF EUROPE SA", contact: "", adresse: "", cp: "74350", ville: "ALLONZIER-LA-CAILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1120", societe: "PLASTIC OMNIUM COMOSITE", contact: "", adresse: "ZI DE LA CNR", cp: "07340", ville: "ANDANCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1121", societe: "PLATE-FORME CORA LOGISTIQUE", contact: "", adresse: "300 Rue Gustave Eiffel", cp: "54710", ville: "Ludres", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1122", societe: "PM CASTORS", contact: "", adresse: "", cp: "1214", ville: "VERNIER - GE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1123", societe: "POLE EMPLOI LE CINETIC", contact: "", adresse: "IMMEUBLE LE CINETIC", cp: "75020", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1124", societe: "POLYCLINIQUE SAINT COME / COMPIEGNE", contact: "", adresse: "7 rue Jean-Jacques Bernard", cp: "60200", ville: "COMPIEGNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1125", societe: "POLYGONE / GRENOBLE", contact: "", adresse: "", cp: "38000", ville: "GRENOBLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1126", societe: "POLYNT COMPOSITES", contact: "", adresse: "Route d'arras", cp: "62320", ville: "Drocourt", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1127", societe: "POLYPEPTIDE LABORATORIES FRANCE SAS", contact: "", adresse: "7 Rue de Boulogne", cp: "67100", ville: "Strasbourg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1128", societe: "PORT RHÉNAN DE COLMAR - NEUF-BRISACH", contact: "", adresse: "ZONE PORTUAIRE", cp: "68600", ville: "VOLGELSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1129", societe: "POT (CCIAG)", contact: "", adresse: "42 Chemin de la Poterne", cp: "38100", ville: "Grenoble", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1130", societe: "POUDMET", contact: "", adresse: "26 Rue du Moulin", cp: "60140", ville: "Bailleval", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1131", societe: "POULAILLON", contact: "Christophe GUEDES, cguedes@sovec-entreprises.fr, 06 26 28 97 49", adresse: "08 RUE DU Luxembourg", cp: "68310", ville: "WITTELSHEIM", email: "", telephone: "03 89 43 43 18" },
-  { id: uid(), code: "CLI-1132", societe: "PREFECTURE DE POLICE", contact: "", adresse: "DIRECTION REGIONALE DES FINANCES PUBLIQUES, 16 RUE NOTRE DAME DES VICTOIRES", cp: "75081", ville: "PARIS CEDEX 02", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1133", societe: "PREFECTURE DE POLICE", contact: "Thierry FOURNIER , thierry.fournier@interieur.gouv.fr, 06 32 63 42 93", adresse: "4 RUE JULES BRETON - 13E", cp: "75005", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1134", societe: "PREFECTURE DE POLICE THORETON 15EME", contact: "", adresse: "3 BIS IMPASSE VILLA THORÉTON", cp: "75015", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1135", societe: "PRESENCE VERTE LUDRES", contact: "", adresse: "652 RUE DENIS PAPIN", cp: "54710", ville: "LUDRES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1136", societe: "PRESS-SERV (Anciennement SOCPREST)", contact: "", adresse: "285 RUE GUY MOLLET", cp: "62221", ville: "NOYELLES SOUS LENS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1137", societe: "PROCTER AND GAMBLE", contact: "", adresse: "Rue André Durouchez", cp: "80080", ville: "AMIENS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1138", societe: "PRODUITS CHIMIQUES DE LOOS", contact: "", adresse: "RUE GEORGES CLEMENCEAU", cp: "59120", ville: "LOOS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1139", societe: "PROLOGIS", contact: "", adresse: "23 RUE DES COMBES", cp: "38290", ville: "SATOLAS & BONCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1140", societe: "PROTECTLINE / 1 PLACE JEAN-BAPTISTE CLÉMENT", contact: "", adresse: "BATIMENT LE CAPITOLE", cp: "93160", ville: "NOISY LE GRAND", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1141", societe: "PYRAMIDION / LA DEFENSE 92", contact: "", adresse: "34 Avenue Léonard de Vinci", cp: "92400", ville: "Courbevoie", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1142", societe: "RAGOT ELECTRICITE GENERALE", contact: "", adresse: "360, RUE JEAN MOULIN", cp: "88140", ville: "CONTREXEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1143", societe: "RAON CIRCULAR REGENERATION (ANCIENNEMENT PAPETERIE RAON)", contact: "", adresse: "RUE EMILE ZOLA", cp: "88110", ville: "RAON-L'ETAPE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1144", societe: "RAS INTERIM", contact: "", adresse: "10 RUE JEAN MARCUIT", cp: "69009", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1145", societe: "R-CUE ST LOUIS", contact: "", adresse: "9 BD EUROPE BOURGFELDEN", cp: "68300", ville: "SAINT LOUIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1146", societe: "REBORN VOSGES", contact: "", adresse: "11 ROUTE DE DOMMARTIN", cp: "88200", ville: "VECOUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1147", societe: "RECIPHARM", contact: "", adresse: "23 AVENUE GEORGES FERRENBACH", cp: "68240", ville: "KAYSERSBERG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1148", societe: "REED EXPOSITIONS / PUTEAUX", contact: "", adresse: "52 QUAI DION BOUTON", cp: "92800", ville: "PUTEAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1149", societe: "REFINITIV", contact: "", adresse: "6-8 BOULEVARD HAUSSMANN", cp: "75009", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1150", societe: "REFRESCO-FRUITE LA ROCHE", contact: "", adresse: "ROUTE DE LA ROCHE PARNAL ZI DE LA BALME", cp: "74800", ville: "LA ROCHE SUR FORON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1151", societe: "REGION HAUT DE FRANCE - POLE MER, TRANSPORT, ET MOBILITE", contact: "", adresse: "DIRECTION DE LA MER, DES PORTS ET DU LITTORAL, SERVICE MAINTENANCE ET EQUIPEMENTS, 45 QUAI DE LA MEUSE", cp: "62100", ville: "CALAIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1152", societe: "REGION HAUTS DE FRANCE (SIÈGE)", contact: "", adresse: "151 AVENUE DU PRESIDENT HOOVER", cp: "59555", ville: "LILLE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1153", societe: "REKUP-IT", contact: "", adresse: "5 RUE DU CHANT DES OISEAUX", cp: "78360", ville: "MONTESSON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1154", societe: "RENAULT DOUAI", contact: "", adresse: "CUINCY", cp: "59509", ville: "DOUAI CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1155", societe: "RENAULT MCA MAUBEUGE", contact: "", adresse: "107 AVENUE ANDRÉ CHAUSSON", cp: "59750", ville: "FEIGNIES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1156", societe: "RENAULT SPORT", contact: "", adresse: "AVENUE DU PRÉSIDENT KENNEDY", cp: "91117", ville: "VIRY-CHÂTILLON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1157", societe: "RENAULT SPORT CARS", contact: "", adresse: "Z.A. DE COURTABOEUF 2", cp: "91978", ville: "LES ULIS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1158", societe: "RENOVA FRANCE", contact: "", adresse: "ZI DE LA CROIX DES VERNES", cp: "03270", ville: "ST YORRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1159", societe: "RESEAU DE CHALEUR URBAIN", contact: "", adresse: "14 PLACE DES HALLES", cp: "67000", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1160", societe: "RICOH INDUSTRIE FRANCE SAS", contact: "", adresse: "144 ROUTE DE ROUFFACH", cp: "68920", ville: "WETTOLSHEIM COLMAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1161", societe: "RIVER OUEST / BEZONS", contact: "", adresse: "80 Quai Voltaire", cp: "95870", ville: "Bezons", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1162", societe: "RME GENIE ELECTRIQUE", contact: "", adresse: "49 Rue de la Prairie", cp: "94120", ville: "FONTENAY-SOUS-BOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1163", societe: "RMN ARSENAL", contact: "", adresse: "254-256 RUE DE BERCY", cp: "75012", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1164", societe: "ROIRET SERVICES", contact: "", adresse: "50 RUE JEAN ZAY", cp: "69794", ville: "ST PRIEST CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1165", societe: "ROLAND MONTERRAT", contact: "", adresse: "226 RUE DE LA LOEZE", cp: "01570", ville: "FEILLENS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1166", societe: "ROSSMANN", contact: "", adresse: "HURST", cp: "67730", ville: "LA VANCELLE GARE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1167", societe: "ROYAL MONEAU / PARIS 8", contact: "", adresse: "37 AVENUE FOCH", cp: "75008", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1168", societe: "S.E.T.E (SOCIETE D'EXPLOITATION THERMIQUE DE L'ESPLANADE)", contact: "", adresse: "5 ROUTE DU PETIT RHIN", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1169", societe: "SA LINDAL FRANCE", contact: "", adresse: "ZONE INDUSTRIELLE LA CHESNOIS, 4 RUE GUSTAVE EIFFEL", cp: "54150", ville: "BRIEY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1170", societe: "SA3I", contact: "", adresse: "ZAC DES HAUTES BRUYERES", cp: "94800", ville: "VILLEJUIF", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1171", societe: "SA3I CHALON", contact: "", adresse: "AGENCE CENTRE EST", cp: "71530", ville: "CHAMFORGEUIL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1172", societe: "SA3I THIAIS", contact: "", adresse: "PARC D'ACTIVITES - BATIMENT F", cp: "94320", ville: "THIAIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1173", societe: "SAARSTAHL RAIL", contact: "", adresse: "164 RUE MARECHAL FOCH, BP 10166", cp: "57700", ville: "HAYANGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1174", societe: "SAATI FRANCE", contact: "", adresse: "74 ROUTE DE BAPAUME", cp: "80360", ville: "SAILLY SAILLISEL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1175", societe: "SAFRAN AEROSYSTEMS DUCTS", contact: "", adresse: "5 Rue des Ateliers", cp: "60200", ville: "Compiègne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1176", societe: "SAFRAN ELECTRONICS & DEFENSE", contact: "", adresse: "", cp: "91300", ville: "MASSY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1177", societe: "SAINT-GOBAIN PAM BUILDING - BAYARD SUR MARNE", contact: "", adresse: "Rue de la Gare", cp: "52170", ville: "Bayard-sur-Marne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1178", societe: "SAINT-GOBAIN PAM CANALISATION - FOUG", contact: "", adresse: "Avenue des Fonderies", cp: "54570", ville: "Foug", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1179", societe: "SAINT-GOBAIN WEBER", contact: "", adresse: "ROUTE DE LYON", cp: "01960", ville: "SERVAS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1180", societe: "SALAISONS BOLARD FRERES", contact: "", adresse: "4 Rue Philibert de la Baume", cp: "39160", ville: "St.-Amour", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1181", societe: "DMV MANNESMANN STAINLESS", contact: "", adresse: "1 ROUTE DE SEMUR", cp: "21500", ville: "MONTBARD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1182", societe: "SAM NEUVES-MAISONS (SOCIETE DES ACIERS D'ARMATURE)", contact: "", adresse: "Rue de Victor Lespinats", cp: "54230", ville: "Neuves-Maisons", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1183", societe: "SAMEX", contact: "", adresse: "BÂTIMENT LE LOMBARD", cp: "92442", ville: "ISSY LES MOULINEAUX CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1184", societe: "SANDERS NORD EST", contact: "", adresse: "13 ROUTE DE MAIXE", cp: "54370", ville: "EINVILLE AU JARD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1185", societe: "SANIJURA (KOHLER)", contact: "", adresse: "33 RUE STEPHEN PICHON, BP 107", cp: "39300", ville: "CHAMPAGNOLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1186", societe: "SANOFI LE TRAIT", contact: "", adresse: "1051 BOULEVARD INDUSTRIEL", cp: "76580", ville: "LE TRAIT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1187", societe: "SANOFI MAISONS-ALFORT", contact: "", adresse: "180 RUE JEAN JAURES", cp: "94700", ville: "MAISONS-ALFORT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1188", societe: "SANOFI VAL DE REUIL", contact: "", adresse: "VOIE DE L'INSTITUT", cp: "Incarville", ville: "27400", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1189", societe: "SANTERNE CARVIN", contact: "", adresse: "67 RUE JACQUES MONOD, ZONE DU PETIT BRULARD", cp: "62220", ville: "CARVIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1190", societe: "SANTERNE MARNE", contact: "", adresse: "15 AVENUE BECQUEREL, ESPACE D'ACTIVITES BECQUEREL", cp: "51000", ville: "CHALONS EN CHAMPAGNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1191", societe: "SAS LES GATINES (PAYEUR CM-CIC SERVICES)", contact: "", adresse: "167, ROUTE DES GATINES", cp: "91370", ville: "VERRIERES-LE-BUISSON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1192", societe: "SAS MAUBREUIL", contact: "", adresse: "12 ALLEE DE MAUBREUIL", cp: "44470", ville: "CARQUEFOU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1193", societe: "SASI", contact: "", adresse: "20 RTE D'OFFENDORF", cp: "67760", ville: "GAMBSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1194", societe: "SATMA INDUSTRIES (ANCIENNEMENT SATMA PPC)", contact: "", adresse: "Zone d'Activités La Chandellière", cp: "38570", ville: "Goncelin", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1195", societe: "SATURNE TANNERIE FORTIER BEAULIEU", contact: "", adresse: "51 Rue Bellevue", cp: "42300", ville: "Roanne", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1196", societe: "SAUER", contact: "", adresse: "PARC INDUSTRIEL DE SARREGUEMINES SUD, 15 RUE RENE FRANCOIS JOLLY", cp: "57200", ville: "SARREGUEMINES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1197", societe: "SAVIEL", contact: "", adresse: "Impasse Jacquard", cp: "69730", ville: "Genay", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1198", societe: "SAVOIE REFRACTAIRES", contact: "", adresse: "30 RUE LOUIS JOUVET", cp: "69631", ville: "VENISSIEUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1199", societe: "SCAPALSACE ENTREPÔT ALFA", contact: "", adresse: "", cp: "68127", ville: "NIEDERHERGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1200", societe: "SCAPALSACE ENTREPOT HAUSSMANN", contact: "", adresse: "PARC À PALETTES, 4 RUE JEAN MICHEL HAUSSMANN", cp: "68000", ville: "COLMAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1201", societe: "SCAPALSACE ENTREPÔT PERLE", contact: "", adresse: "RTE DE HERRLISHEIM", cp: "68127", ville: "NIEDERHERGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1202", societe: "SCAPALSACE LADHOF (SIEGE)", contact: "", adresse: "157 RUE DU LADHOF", cp: "68025", ville: "COLMAR CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1203", societe: "SCHAAL CHOCOLATIER", contact: "", adresse: "RUE DU PONT DU PEAGE", cp: "67118", ville: "GEISPOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1204", societe: "SCHAEFFLER / 45", contact: "", adresse: "RUE ALFRED MORINIERE", cp: "45520", ville: "CHEVILLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1205", societe: "SCHILLIGER BOIS", contact: "", adresse: "RUE DU PORT RHENAN", cp: "68600", ville: "VOLGELSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1206", societe: "SCHMIDT GROUPE LIEPVRE (SALM)", contact: "", adresse: "5 RUE CLEMENCEAU, BP 5", cp: "68660", ville: "LIEPVRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1207", societe: "SCHMIDT GROUPE UNITE 1 (SALM)", contact: "", adresse: "20 RUE DE WESTRICH", cp: "67600", ville: "SELESTAT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1208", societe: "SCHOELLER ALLIBERT", contact: "", adresse: "EN DORAISE", cp: "01460", ville: "NURIEUX VOLOGNAT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1209", societe: "SCHOTT VTF", contact: "", adresse: "43 RUE DE LA LIBERATION", cp: "57870", ville: "TROISFONTAINES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1210", societe: "SCI DES ANTONS", contact: "", adresse: "3 ROND POINT DES ANTONS", cp: "44700", ville: "ORVAULT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1211", societe: "SCI POLICO", contact: "", adresse: "160 AVENUE PAUL VAILLANT COUTURIER", cp: "93120", ville: "LA COURNEUVE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1212", societe: "SCIERIE ET CAISSERIE DE STEINBOURG", contact: "", adresse: "RUE DE LA SCIERIE", cp: "67790", ville: "STEINBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1213", societe: "SCORE / PARIS 16", contact: "", adresse: "5 Avenue Kléber", cp: "75116", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1214", societe: "SDIS 19 TULLE", contact: "", adresse: "AVENUE EVARISTE GALOIS", cp: "19000", ville: "TULLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1215", societe: "SE2M SERVICES", contact: "", adresse: "42 RUE DU COMMANDANT ROLLAND", cp: "93350", ville: "LE BOURGET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1216", societe: "SE3M", contact: "", adresse: "13 Rue Jean Jaurès", cp: "92800", ville: "PUTEAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1217", societe: "SECHE ECO SERVICE", contact: "", adresse: "USINE DE NEUTRALISATION, SITE DE L'OCHSENFELD, ROUTE DE MULHOUSE", cp: "68800", ville: "VIEUX THANN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1218", societe: "SECO TOOLS TOOLING SYSTEMS", contact: "", adresse: "8 BIS RUE DE NEUWILLER", cp: "67330", ville: "BOUXWILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1219", societe: "SECURITAS CALUIRE", contact: "", adresse: "393 CHEMIN DU BAC A TRAILLE", cp: "69300", ville: "CALUIRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1220", societe: "SEINE AVENUE", contact: "", adresse: "231 RUE SAINT HONORE", cp: "75001", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1221", societe: "SEMIN", contact: "", adresse: "1 A RUE DE LA GARE", cp: "57920", ville: "KEDANGE SUR CANNER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1222", societe: "SEPD (SOCIÉTÉ D'EXPLOITATION DES PORTS DU DÉTROIT)", contact: "", adresse: "359 RUE DES MARGATS", cp: "62200", ville: "BOULOGNE SUR MER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1223", societe: "SEQENS NOVAPEX ROUSSILLON", contact: "", adresse: "RUE GASTON MONMOUSSEAU", cp: "38150", ville: "LE PEAGE DE ROUSSILLON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1224", societe: "SERPELEC", contact: "", adresse: "66 CHEM VALLON DE LA CASTAGNE", cp: "06410", ville: "BIOT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1225", societe: "SES-STERLING", contact: "", adresse: "Rue du Technoparc, ZAC DU TECHNOPARC", cp: "68220", ville: "Hésingue", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1226", societe: "SET MONT BLANC", contact: "", adresse: "159 route de la Centrale", cp: "74190", ville: "PASSY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1227", societe: "SETAM / VAL THORENS", contact: "", adresse: "Rue du Circuit", cp: "73440", ville: "Les Belleville", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1228", societe: "SETFORGE", contact: "", adresse: "ROUTE DES FORGES", cp: "71800", ville: "LA CLAYETTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1229", societe: "SETFORGE (Anciennement Manoir Industries)", contact: "", adresse: "Route de Guerstling", cp: "57320", ville: "BOUZONVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1230", societe: "SETFORGE L'HORME", contact: "", adresse: "33 Avenue Berthelot", cp: "42152", ville: "L’Horme", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1231", societe: "SETRALOG", contact: "", adresse: "285 RUE GUY MOLLET, BP 80", cp: "62246", ville: "NOYELLES SOUS LENS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1232", societe: "SEVES", contact: "", adresse: "3 ZA DE LA TUILERIE", cp: "71640", ville: "DRACY-LE-FORT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1233", societe: "SEVES TOULOUSE", contact: "", adresse: "14 RUE JEAN PERRIN", cp: "31100", ville: "TOULOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1234", societe: "SEW USOCOME - FORBACH", contact: "", adresse: "ZI, TECHNOPOLE FORBACH SUD", cp: "57604", ville: "FORBACH", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1235", societe: "SEW USOCOME MOMMENHEIM", contact: "", adresse: "1 Rue de Bruxelles", cp: "67670", ville: "Mommenheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1236", societe: "SHARP", contact: "", adresse: "ROUTE DE BOLLWILLER", cp: "68360", ville: "SOULTZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1237", societe: "SHB ELECTRIC", contact: "", adresse: "5 Rue des Sources", cp: "95640", ville: "Brignancourt", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1238", societe: "SIBELCO / 77", contact: "", adresse: "2 Rue de Foljuif", cp: "77140", ville: "Saint-Pierre-lès-Nemours", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1239", societe: "SICAL (GROUPE ROSSMANN)", contact: "", adresse: "69 RUE DU DOCTEUR PONTIER", cp: "62380", ville: "LUMBRES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1240", societe: "SIERE MORHANGE", contact: "", adresse: "12 RUE DU GENERAL DE CASTELNAU", cp: "57340", ville: "MORHANGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1241", societe: "SIME 68", contact: "", adresse: "31 Rue de l'europe", cp: "68700", ville: "Cernay", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1242", societe: "SINIAT (ETEX) OTTMARSHEIM", contact: "", adresse: "ZONE INDUSTRIEL NORD", cp: "68490", ville: "OTTMARSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1243", societe: "SIOBRA (SOC INDUSTR D OUTILL ET BUREAU REAL AUTO)", contact: "", adresse: "4 ROUTE DE VILLENEUVE", cp: "39600", ville: "ARBOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1244", societe: "SITEL - ACTICALL NANCY (FOUNDEVER)", contact: "Franck BIGARE, franck.bigare@dalkia.fr, 06 29 52 01 37", adresse: "16 BD LA MOTHE", cp: "54000", ville: "NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1245", societe: "SKEMA BUSINESS SCHOOL", contact: "", adresse: "5 QUAI MARCEL DASSAULT", cp: "92150", ville: "SURESNES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1246", societe: "SLCT (SOCIETE LORRAINE DE CATAPHORESE TECHNIQUE)", contact: "", adresse: "LIEU DIT HAUT PONT, RUE DE METZ", cp: "57650", ville: "FONTOY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1247", societe: "SMR DE MASSY PALAISEAU", contact: "", adresse: "33 Boulevard de Palaiseau", cp: "91120", ville: "Palaiseau", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1248", societe: "SNCF GARE CERGY LE HAUT", contact: "", adresse: "", cp: "95800", ville: "CERGY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1249", societe: "SNCF PARIS 10", contact: "", adresse: "162 boulevard Saint-Martin", cp: "75010", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1250", societe: "SNEF", contact: "", adresse: "490, RUE RENE JACOT, AGENCE D'ETUPES", cp: "25460", ville: "ETUPES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1251", societe: "SNEF / MONTPELLIER VIA SHB PARIS", contact: "", adresse: "81 Rue Du Salaison", cp: "34130", ville: "Mauguio", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1252", societe: "SNEF BRON", contact: "", adresse: "11 ALLEE DU GENERAL BENOIST", cp: "69673", ville: "BRON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1253", societe: "SNEF VALENCE", contact: "", adresse: "420 AVENUE DE CHABEUIL", cp: "26902", ville: "VALENCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1254", societe: "SOCIETE ANDRE BAZIN", contact: "", adresse: "1 RUE SAINTE MARIE", cp: "70300", ville: "BREUCHES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1255", societe: "SOCIETE EXPLOITATION DE LA TOUR EIFFEL", contact: "", adresse: "QUAI BRANLY", cp: "75007", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1256", societe: "SOCIETE FROMAGERE D ETEAUX", contact: "", adresse: "44 RUE DU MONT BLANC", cp: "74800", ville: "ETAUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1257", societe: "SOCIETE FROMAGERE DE LONS LE SAUNIER", contact: "", adresse: "39 Avenue Camille Prost", cp: "39000", ville: "Lons-le-Saunier", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1258", societe: "SOCIETE FROMAGERE DE RAIVAL", contact: "", adresse: "11 Grande Rue", cp: "55260", ville: "Raival", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1259", societe: "SOCIETE INDUSTRIELLE DE LEVURE FALA", contact: "", adresse: "8 RUE DE SAINT NAZAIRE", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1260", societe: "SOCIETE INDUSTRIELLE DU HARAS SIH", contact: "", adresse: "LE HARAS", cp: "57430", ville: "SARRALBE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1261", societe: "SOCIETE PETROLIERE DU VAL DE MARNE", contact: "", adresse: "33 ROUTE DES PETROLES", cp: "94290", ville: "VILLENEUVE LE ROI", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1262", societe: "SOCOTEC", contact: "", adresse: "9 RUE DE COURTALIN", cp: "77700", ville: "MAGNY LE HONGRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1263", societe: "SODEL HEILLECOURT", contact: "", adresse: "ALLEE DES SORBIERS, BP 47", cp: "54182", ville: "HEILLECOURT CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1264", societe: "SODEL ST DIE", contact: "", adresse: "8 RUE DU 12EME D'ARTILLERIE", cp: "88101", ville: "ST DIE DES VOGES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1265", societe: "SODEXO", contact: "", adresse: "6 Rue de la Redoute", cp: "78280", ville: "Guyancourt", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1266", societe: "SODEXO ENERGIE ET MAINTENANCE (SIEGE)", contact: "", adresse: "30 COURS DE L'ILE SEGUIN", cp: "92777", ville: "BOULOGNE BILLANCOURT CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1267", societe: "SODIAAL CANDIA", contact: "", adresse: "CHEMIN DES MINES", cp: "38200", ville: "VIENNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1268", societe: "SOFRADIM", contact: "", adresse: "Avenue du Formans", cp: "01600", ville: "Trévoux", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1269", societe: "SOGEMAINT / TAVERNY", contact: "", adresse: "2 Rue Émile Sehet", cp: "95150", ville: "Taverny", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1270", societe: "SOLOCAP MAB", contact: "", adresse: "130 CHEMIN DES LACS", cp: "88140", ville: "CONTREXEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1271", societe: "SOLVAY - CARBONATE - FRANCE", contact: "", adresse: "RUE GABRIEL PERI", cp: "54110", ville: "DOMBASLE SUR MEURTHE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1272", societe: "SOTRALENTZ PACKAGING SA", contact: "", adresse: "3 RUE DE BETTWILLER", cp: "67320", ville: "DRULINGEN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1273", societe: "SOVAB - SOCIETE VEHICULES AUTOMOBILES BATILLY", contact: "", adresse: "JADENOT", cp: "54580", ville: "ST AIL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1274", societe: "SOVEC HINDISHEIM", contact: "", adresse: "12 RUE DE LA KALTAU", cp: "67150", ville: "HINDISHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1275", societe: "SOVEC ILLZACH", contact: "", adresse: "35 Avenue d'italie", cp: "68110", ville: "Illzach", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1276", societe: "SPEICHIM PROCESSING SAINT-VULBAS", contact: "", adresse: "PIPA", cp: "01150", ville: "SAINT VULBAS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1277", societe: "SPIE BATIGNOLLES", contact: "", adresse: "30 AVENUE DU GÉNÉRAL GALLIENI", cp: "92000", ville: "NANTERRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1278", societe: "SPIE DIRECTION MAINTENANCE ET SERVICES", contact: "", adresse: "DIRECTION MAINTENANCE ET SERVICES", cp: "93287", ville: "SAINT DENIS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1279", societe: "SPIE DIRECTION REGIONALE IDF", contact: "", adresse: "ZI LA MARINIERE", cp: "91071", ville: "BONDOUFLE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1280", societe: "SPIE DUNKERQUE", contact: "", adresse: "AGENCE CÔTE D'OPALE, ZI DE PETITE SYNTHE, 1815 RUE ACHILLE PERES, BP 59", cp: "59944", ville: "DUNKERQUE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1281", societe: "SPIE FACILITIES AGENCE PICARDIE", contact: "", adresse: "11 ALLEE MONGE", cp: "60009", ville: "BEAUVAIS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1282", societe: "SPIE FACILITIES DIRECTION DU DEVELOPEMENT ET DE LA TRANSFORMATION IDF", contact: "", adresse: "3 Place de la Berline", cp: "93200", ville: "St.-Denis", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1283", societe: "SPIE FACILITIES SUD-EST BEYNOST", contact: "", adresse: "110 RUE DU CHAT BOTTE", cp: "01700", ville: "BEYNOST", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1284", societe: "SPIE INDUSTRIE & TERTIAIRE", contact: "", adresse: "1-3 PLACE DE LA BERLINE", cp: "93287", ville: "SAINT DENIS CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1285", societe: "SPIE INDUSTRIE & TERTIAIRE & FACILITIES - (HOLTZHEIM)", contact: "", adresse: "PARC D'ACTIVITÉS JOFFRE, 3 RUE LUCIEN VELTEN, CS 50208", cp: "67810", ville: "HOLTZHEIM CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1286", societe: "SPIE INDUSTRIE ET TERTIAIRE - DIVISION INDUSTRIE", contact: "", adresse: "55 RUE DE PFASTATT, CEDEX 2", cp: "68060", ville: "MULHOUSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1287", societe: "SPIE INDUSTRIE ET TERTIAIRE VALENCE", contact: "", adresse: "Z.I. DE BRIFFAUT EST, BP 60076", cp: "26903", ville: "VALENCE CDEX 9", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1288", societe: "SPONTEX", contact: "", adresse: "74 RUE DE SAINT JUST DES MARAIS", cp: "60000", ville: "BEAUVAIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1289", societe: "ST MICHEL CHAMPAGNAC", contact: "", adresse: "Avenue Jean Ducourtieux", cp: "24530", ville: "Champagnac-de-Belair", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1290", societe: "STADE AUGUSTE BONAL", contact: "Gilles BIETRY, gilles.bietry@vinci-facilities.com, 06 13 30 60 14", adresse: "2 IMPASSE DE LA FORGE", cp: "25200", ville: "MONTBELIARD", email: "", telephone: "03 84 19 34 56" },
-  { id: uid(), code: "CLI-1291", societe: "STADE DUVAUCHELLE", contact: "THIERRY Alain, alain.thierry@derichebourg-multiservices.com, 06 35 54 19 01", adresse: "RUE DOMINIQUE DUVAUCHELLE", cp: "94035", ville: "CRETEIL CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1292", societe: "STATION AVIA ALLIER SAULZET A71", contact: "", adresse: "A 71 AIR DE L'ALLIER SAULZET", cp: "03170", ville: "DOYET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1293", societe: "STATION AVIA CRETS BLANCS", contact: "", adresse: "A410 AIRE DES CRETS BLANCS, SENS ANNECY / CHAMONIX", cp: "74570", ville: "GROISY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1294", societe: "STATION AVIA GLANON A36", contact: "", adresse: "A 36 SENS MULHOUSE - BEAUNE", cp: "21250", ville: "SEURRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1295", societe: "STATION AVIA LA PALME A9", contact: "", adresse: "AIRE DE LA PALME EST- A9", cp: "11480", ville: "LA PALME", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1296", societe: "STATION AVIA ROUSSET", contact: "", adresse: "CHEMIN", cp: "13790", ville: "ROUSSET", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1297", societe: "STATION AVIA VALMY LE MOULIN", contact: "", adresse: "37 Voie de la Liberté", cp: "51800", ville: "Valmy", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1298", societe: "STATION AVIA VIDAUBAN SUD", contact: "", adresse: "A8", cp: "83550", ville: "Vidauban", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1299", societe: "STATION D'EPURATION DE BISCHWILLER", contact: "", adresse: "Rue de la Chartreuse", cp: "67240", ville: "Bischwiller", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1300", societe: "STATION D'EPURATION DE CERNAY", contact: "", adresse: "Rue de Wittelsheim", cp: "68700", ville: "Cernay", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1301", societe: "STATION D'EPURATION DE MEISTRATZHEIM", contact: "", adresse: "ROUTE DEPARTEMENTAL 215", cp: "67210", ville: "MEISTRATZHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1302", societe: "STATION D'EPURATION DU SITEUCE", contact: "", adresse: "200 RUE DU LADHOF", cp: "68000", ville: "COLMAR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1303", societe: "STATION DEUX ALPES", contact: "", adresse: "LE MEIJOTEL", cp: "38860", ville: "LES DEUX ALPES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1304", societe: "STATION HERTZIENNE MONT-VENTOUX - CRSA 18804", contact: "", adresse: "D974", cp: "84410", ville: "BEDOIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1305", societe: "STATION SERRE CHEVALIER", contact: "", adresse: "6 ROUTE DE BEZ", cp: "5240", ville: "LA SALLE LES ALPES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1306", societe: "STEF LOGISTIQUE REICHSTETT", contact: "", adresse: "Rue des Entrepôts", cp: "67116", ville: "Reichstett", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1307", societe: "STEP CLERMONT", contact: "", adresse: "64-66 AVENUE DE L'UNION SOVIETIQUE", cp: "63007", ville: "CLERMONT-FERRAND", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1308", societe: "STOCKMEIER URETHANES FRANCE", contact: "", adresse: "8 RUE DE L INDUSTRIE", cp: "68700", ville: "CERNAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1309", societe: "STOEFFLER - CHARCUTERIE ALSACIENNE", contact: "", adresse: "BOULEVARD DE L EUROPE", cp: "67210", ville: "OBERNAI", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1310", societe: "STRASBOURG CENTRE ENERGIES", contact: "", adresse: "14 Place des Halles", cp: "67000", ville: "Strasbourg", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1311", societe: "STRASBOURG ENERGIE", contact: "", adresse: "1 BIS RUE DU DOUBS", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1312", societe: "STRYKER", contact: "", adresse: "17 CHEMIN DE MARTICOT", cp: "33610", ville: "CESTAS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1313", societe: "STS ANDANCE", contact: "", adresse: "ZI DE LA CNR", cp: "07340", ville: "ANDANCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1314", societe: "STS FELINES", contact: "", adresse: "LE FLACHER", cp: "07340", ville: "FELINES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1315", societe: "STS SAINT-DESIRAT", contact: "", adresse: "ECOLANGES", cp: "07340", ville: "SAINT-DESIRAT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1316", societe: "SUEZ RV BIOENERGIES / CONFLANS EN JARNISY", contact: "", adresse: "AVENUE DE LA REPUBLIQUE", cp: "54800", ville: "CONFLANS EN JARNISY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1317", societe: "SUEZ RV BIOENERGIES / FLEVY", contact: "", adresse: "10 CHELAINCOURT", cp: "57365", ville: "FLEVY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1318", societe: "SUEZ RV BIOENERGIES / LESMENILS", contact: "", adresse: "ROUTE DE MOUSSON", cp: "54700", ville: "LESMENILS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1319", societe: "SUEZ RV BIOENERGIES / MENARMONT", contact: "", adresse: "LIEU DIT LA HAIE ROUSSE, RUE DE DONCIERES", cp: "88700", ville: "MENARMONT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1320", societe: "SUEZ RV EVNA", contact: "", adresse: "USINE DE VALORISATION, 4 RUE DU CLAUSENHOF", cp: "67590", ville: "SCHWEIGHOUSE-SUR-MODER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1321", societe: "SUEZ RV NORD EST - MENARMONT", contact: "", adresse: "ROUTE DE DONCIERES", cp: "88700", ville: "MENARMONT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1322", societe: "SUEZ RV NORD EST RETZWILLER", contact: "", adresse: "RUE DE LA CITE, LIEU DIT ESPEN", cp: "68210", ville: "RETZWILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1323", societe: "SUEZ RV NORD EST TETING", contact: "", adresse: "RUE D'HEMERING, LIEU DIT GEBRUCKEN", cp: "57385", ville: "TETING SUR NIED", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1324", societe: "SUEZ VALOMARNE / CRETEIL", contact: "", adresse: "11 Rue des Malfourches", cp: "94000", ville: "Créteil", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1325", societe: "SULO FRANCE", contact: "", adresse: "RUE DE L'ETOILE DE LANGRES", cp: "52200", ville: "LANGRES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1326", societe: "SUPER U TRUCHTERSHEIM", contact: "", adresse: "29 Rue de la Gare", cp: "67370", ville: "Truchtersheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1327", societe: "SUZ RV NORD EST VILLONCOURT", contact: "", adresse: "ROUTE DE LA CAMPAGNE", cp: "88150", ville: "VILLONCOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1328", societe: "SWING-WS", contact: "", adresse: "17 CHEMIN DES TRAVAILS, ZA DES TRAVAILS , BAT LA BRIQUETERIE ENTREE B/C", cp: "06800", ville: "CAGNES SUR MER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1329", societe: "SYNELVA COLLECTIVITES", contact: "", adresse: "12 RUE DU PRESIDENT KENNEDY", cp: "28110", ville: "LUCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1330", societe: "TAYLOR WESSING", contact: "", adresse: "69 AVENUE FRANKLIN ROOSEVELT", cp: "75008", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1331", societe: "TEFAL SAS RUMILLY", contact: "", adresse: "ZI DES GRANGES, BP 89", cp: "74156", ville: "RUMILLY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1332", societe: "TELEHOUSE INT CORPORATION", contact: "", adresse: "1 Rue Pablo Picasso", cp: "78114", ville: "Magny-les-Hameaux", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1333", societe: "TENNECO (EX FEDERAL MOGUL VALVETRAIN)", contact: "", adresse: "31 RUE DES FORGES", cp: "67130", ville: "SCHIRMECK", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1334", societe: "TENTE ROULETTES POLYMERES - BRUANDET", contact: "", adresse: "13 RUE DES CHARMOIS", cp: "39700", ville: "LA BARRE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1335", societe: "TEREOS SIEGE ADMINISTRATIF", contact: "", adresse: "TOUR LILLEUROPE", cp: "59777", ville: "LILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1336", societe: "TEREOS STARCH & SWEETENERS EUROPE (EX TEREOS MESNIL-ST-NICAISE)", contact: "", adresse: "46, RUE NESLE", cp: "80190", ville: "MESNIL-ST-NICAISE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1337", societe: "TEREOS STARCH & SWEETENERS EUROPE (EX TEREOS SYRAL SAS MARCKOLSHEIM)", contact: "", adresse: "ZI ET PORTUAIRE - BP 32", cp: "67390", ville: "MARCKOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1338", societe: "THALES THONON", contact: "", adresse: "ZONE INDUSTRIEL DE VONGY", cp: "74200", ville: "THONON-LES-BAINS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1339", societe: "THERMES DE CONTREXEVILLE", contact: "", adresse: "GALERIE THERMALE", cp: "88140", ville: "CONTREXEVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1340", societe: "THEVENIN DUCROT AUTOROUTES", contact: "", adresse: "7 RUE DU POINT DU JOUR", cp: "21800", ville: "CHEVIGNY SAINT SAUVEUR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1341", societe: "THK MANUFACTURING", contact: "", adresse: "PARC D'ATIVITE LA PASSERELLE", cp: "68190", ville: "ENSISHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1342", societe: "THYSSENKRUPP PRESTA FRANCE SAS", contact: "", adresse: "8 RUE LAVOISIER", cp: "57190", ville: "FLORANGE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1343", societe: "TIMKEN", contact: "", adresse: "2 RUE TIMKEN, BP 60089", cp: "F - 68002", ville: "COLMAR CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1344", societe: "TORAY FILMS EUROPE", contact: "", adresse: "Place d'arménie", cp: "01700", ville: "Saint-Maurice-de-Beynost", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1345", societe: "TOTAL NEWTON / COURBEVOIE", contact: "", adresse: "9 Place des Vosges", cp: "92400", ville: "Courbevoie", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1346", societe: "TOUR ARIANE 6 ARKEA", contact: "", adresse: "71 VOIE DES SCULPTEURS", cp: "92088", ville: "LA DEFENSE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1347", societe: "TOUR INCITY LYON", contact: "", adresse: "116 Cours Lafayette", cp: "69003", ville: "Lyon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1348", societe: "TOYOTA VALENCIENNES", contact: "", adresse: "PARC D'ACTIVITÉS DE LA VALLÉE", cp: "59264", ville: "ONNAING", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1349", societe: "TRADIVAL", contact: "", adresse: "197 RUE DE CHARLIEU", cp: "42300", ville: "ROANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1350", societe: "TREDI SAINT-VULBAS", contact: "", adresse: "PARC INDUSTRIEL DE LA PLAINE DE L'AIN", cp: "01152", ville: "LAGNIEU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1351", societe: "TREDI SALAISE SUR SANNE", contact: "", adresse: "519 RUE DENIS PAPIN", cp: "38556", ville: "SALAISE SUR SANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1352", societe: "TREFIMETAUX (68)", contact: "", adresse: "31 RUE JOSEPH VOGT", cp: "68290", ville: "MASEVAUX-NIEDERBRUCK", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1353", societe: "TRELLEBORG", contact: "", adresse: "RUE DE CHANTEMERLE", cp: "63050", ville: "CLERMONT FERRAND", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1354", societe: "TRIANGLE DE L'ARCHE / LA DEFENSE", contact: "", adresse: "20 Rue de Valmy", cp: "92800", ville: "Puteaux", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1355", societe: "UEM-METZ", contact: "", adresse: "2 Place du Pontiffroy", cp: "57000", ville: "Metz", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1356", societe: "UGC SIEGE SOCIAL", contact: "", adresse: "SIEGE SOCIAL", cp: "92522", ville: "NEUILLY SUR SEINE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1357", societe: "UGC STRASBOURG", contact: "JEAN NEUVIEME", adresse: "25 ROUTE DU RHIN", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1358", societe: "UGC/PLAISIR (78)", contact: "", adresse: "CCAL MON GRAND PLAISIR", cp: "78370", ville: "PLAISIR", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1359", societe: "UIOM SERTRID BOUROGNE", contact: "", adresse: "Zone Industrielle", cp: "90140", ville: "BOUROGNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1360", societe: "UMICORE AUTOMOTIVE CATALYSTS", contact: "", adresse: "ZI SAINT AGATHE", cp: "57192", ville: "FLORANGE CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1361", societe: "UNIVERSITE DE BOURGOGNE", contact: "", adresse: "MAISON DE L'UNIVERISTE", cp: "21078", ville: "DIJON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1362", societe: "UNIVERSITE DE PICARDIE JULE VERNE", contact: "", adresse: "CS 52501 80025 CEDEX, CHEMIN DU THIL", cp: "80025", ville: "AMIENS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1363", societe: "UNIVERSITE LOUIS PASTEUR", contact: "", adresse: "18 RUE GOETH", cp: "67070", ville: "STRASBOURG CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1364", societe: "UNIVERSITE MARNE LA VALLEE BAT ADN", contact: "", adresse: "2 ALLÉE DU PRO MONTOIRE", cp: "77 MLV", ville: "CHAMPS SUR MARNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1365", societe: "UPM RAFLATAC", contact: "", adresse: "1 Rue du Jet, ZI POMPEY INDUSTRIES", cp: "54340", ville: "Pompey", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1366", societe: "URSSAF", contact: "", adresse: "12 RUE DU BOIS LA CHAMPELLE", cp: "54500", ville: "VANDOEUVRE LES NANCY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1367", societe: "URSSAF ANNECY", contact: "", adresse: "2 Rue Honoré de Balzac", cp: "74600", ville: "SEYNOD", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1368", societe: "URSSAF VENISSIEUX", contact: "", adresse: "6 RUE DU 19 MARS 1962", cp: "69200", ville: "VENISSIEUX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1369", societe: "USEO / 45", contact: "", adresse: "", cp: "45", ville: "CHILLEURS AUX BOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1370", societe: "USINE D'INCINERATION LUDRES", contact: "", adresse: "226 RUE VICTOR GRIGNARD", cp: "54710", ville: "LUDRES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1371", societe: "USINE EVIAN", contact: "", adresse: "Rue des Vignes Rouges", cp: "74500", ville: "PUBLIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1372", societe: "USINE INCINERATION ET VALORISATION - VALAUBIA (VEOLIA)", contact: "Frédéric TILLY, frederic.tilly@veolia.com, 06 26 87 48 02", adresse: "9 Rue Joseph Marie Jacquard", cp: "10600", ville: "La Chapelle-St-Luc", email: "", telephone: "03 72 31 31 31" },
-  { id: uid(), code: "CLI-1373", societe: "USINE VOLVIC NATURE / VOLVIC", contact: "", adresse: "", cp: "63350", ville: "VOLVIC", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1374", societe: "VALEO", contact: "", adresse: "32 RUE DE PARIS", cp: "89100", ville: "SAINT-CLÉMENT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1375", societe: "VALEO BAYEN PARIS", contact: "", adresse: "43 RUE BAYEN", cp: "75017", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1376", societe: "VALERMO", contact: "", adresse: "213 COURS VICTOR HUGO", cp: "33323", ville: "BEGLES CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1377", societe: "VALFLEURI", contact: "CHRISTOPHE GUEDES", adresse: "", cp: "68270", ville: "WITTENHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1378", societe: "VALIANCE GROUPE FAYAT", contact: "", adresse: "17 Rue de l'abbé grégoire", cp: "59760", ville: "Grande-Synthe", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1379", societe: "VALMET (METSO PAPER)", contact: "", adresse: "5 RUE DE L'INDUSTRIE", cp: "68700", ville: "CERNAY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1380", societe: "VALTRIS ENTERPRISES FR - CHAMPLOR", contact: "", adresse: "ZI BALEYCOURT", cp: "55100", ville: "VERDUN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1381", societe: "VEOLIA MONTEREAU / SOVALEM", contact: "", adresse: "22 RUE DE LA GRANDE HAIE", cp: "77130", ville: "MONTEREAU FAULT YONNNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1382", societe: "VERALLIA FRANCE CHALON-SUR-SOANE", contact: "", adresse: "27 Rue André Chénier", cp: "71100", ville: "Chalon-sur-Saône", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1383", societe: "VERALLIA FRANCE ST-ROMAIN", contact: "", adresse: "PLACE VERRERIE", cp: "42610", ville: "SAINT-ROMAIN LE PUY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1384", societe: "VET AGRO SUP", contact: "", adresse: "1 Avenue Bourgelat", cp: "69280", ville: "Marcy-l’Étoile", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1385", societe: "VHL SERVICES (GROUPE VINCENTZ)", contact: "", adresse: "8 RUE DES ALPES", cp: "68127", ville: "NIEDERHERGHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1386", societe: "VIALIS", contact: "", adresse: "10 RUE DES BONNES GENS, CS 70187", cp: "68004", ville: "COLMAR CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1387", societe: "VILLA' RTE", contact: "", adresse: "1 RUE CREPET", cp: "69007", ville: "LYON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1388", societe: "VILLE DE LA GRANDE MOTTE", contact: "", adresse: "PLACE DU 1ER OCTOBRE 1974", cp: "34280", ville: "LA GRANDE MOTTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1389", societe: "VILLE DE PARIS", contact: "", adresse: "103 AVENUE DE FRANCE", cp: "75013", ville: "PARIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1390", societe: "VILLE DE SAINT THIBAULT DES VIGNES", contact: "", adresse: "Place de l'église", cp: "77400", ville: "Saint-Thibault-des-Vignes", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1391", societe: "VILLE DE VILLEURBANNE", contact: "", adresse: "BP 65051 - 69601 VILLEURBANNE", cp: "69601", ville: "VILLERUBANNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1392", societe: "VILLE DU CREUSOT", contact: "", adresse: "1 Boulevard Henri-Paul Schneider", cp: "71200", ville: "Le Creusot", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1393", societe: "VINCI FACILITIES - RHONE-ALPES", contact: "", adresse: "50 RUE JEAN ZAY", cp: "69794", ville: "SAINT PRIEST", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1394", societe: "VINCI FACILITIES (CEGELEC ETUPES)", contact: "", adresse: "685 RUE ARMAND JAPY, ZONE D'ACTIVITE TECHNOLAND", cp: "25460", ville: "ETUPES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1395", societe: "VINCI FACILITIES ALSACE", contact: "", adresse: "10 Rue du Chêne", cp: "67800", ville: "Hœnheim", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1396", societe: "VINCI FACILITIES DSMS - CHAMBERY", contact: "", adresse: "147 ALLEE DES BLACHERES", cp: "73000", ville: "CHAMBERY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1397", societe: "VINCI FACILITIES DSMS - ECHIROLLES", contact: "", adresse: "4 RUE DE L'OCTANT", cp: "38434", ville: "ECHIROLLES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1398", societe: "VINCI FACILITIES FACEO - OREO", contact: "", adresse: "685 Rue Georges Claude", cp: "13290", ville: "Aix-en-Provence", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1399", societe: "VINCI FACILITIES FM DROME ARDECHE - VALENCE", contact: "", adresse: "47 COURS MANUEL DE FALLA", cp: "26000", ville: "VALENCE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1400", societe: "VINCI FACILITIES FM RHONE (FACEO) - SAINT PRIEST", contact: "", adresse: "BAT M - 50 RUE JEAN ZAY", cp: "69808", ville: "ST PRIEST CEDEX", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1401", societe: "VINCI FACILITIES LORRAINE", contact: "", adresse: "4 Rue de la Fontaine, BP 90652, NORROY LE VENEUR", cp: "57140", ville: "Woippy", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1402", societe: "VIRY (Groupe FAYAT)", contact: "", adresse: "Zone Industrielle la Plaine", cp: "88510", ville: "Éloyes", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1403", societe: "VIVENDI / PARIS 8", contact: "", adresse: "42 Avenue de Friedland", cp: "75008", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1404", societe: "VOESTALPINE", contact: "", adresse: "ZA AEROPARC", cp: "90150", ville: "FONTAINE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1405", societe: "WE WORK / TRUDAINE", contact: "", adresse: "37 Avenue Trudaine", cp: "75009", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1406", societe: "WE WORK / 75013", contact: "", adresse: "195 Avenue de France", cp: "75013", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1407", societe: "WE WORK / COLISEE", contact: "", adresse: "40 rue du Colisée", cp: "75008", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1408", societe: "WE WORK / HAUSSMANN", contact: "", adresse: "106 Boulevard Haussmann", cp: "75008", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1409", societe: "WE WORK / LEFEBVRE", contact: "", adresse: "4 Rue Jules Lefebvre", cp: "75009", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1410", societe: "WE WORK / MADRID", contact: "", adresse: "7 Rue de Madrid", cp: "75008", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1411", societe: "WE WORK / NAVARIN", contact: "", adresse: "18 Rue de Navarin", cp: "75009", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1412", societe: "WE WORK / VILLETTE", contact: "", adresse: "172 Boulevard de la Villette", cp: "75019", ville: "Paris", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1413", societe: "WEST PLAZA", contact: "", adresse: "9 11 RUE DU DEBARCADERE", cp: "92700", ville: "COLOMBES", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1414", societe: "WM 88", contact: "", adresse: "PLACE DE LA GARE, BP 10004", cp: "88170", ville: "CHATENOIS", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1415", societe: "WORKSTATION HUMAKEY / COURBEVOIE (ANCIENNEMENT BNP REPM)", contact: "", adresse: "25 Quai du Président Paul Doumer", cp: "92400", ville: "Courbevoie", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1416", societe: "WRIGLEY FRANCE (SNC)", contact: "", adresse: "ZONE INDUSTRIELLE", cp: "68600", ville: "BIESHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1417", societe: "WURTH FRANCE", contact: "", adresse: "RUE GEORGES BESSE", cp: "67150", ville: "ERSTEIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1418", societe: "ZF BOUTHEON", contact: "", adresse: "4 Boulevard Pierre Desgranges,", cp: "42160", ville: "Andrézieux-Bouthéon", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1419", societe: "ZF SYSTEMES DE FREINAGE (TRW)", contact: "", adresse: "1 AVENUE DE LA GARE", cp: "57320", ville: "BOUZONVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1420", societe: "ZURFLUH FELLER", contact: "", adresse: "13 Grande Rue", cp: "25150", ville: "Autechaux-Roide", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1421", societe: "LA CITY", contact: "", adresse: "RUE GABRIEL PLANCON", cp: "25000", ville: "BESANCON", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1422", societe: "HOPITAL D'INSTRUCTION DES ARMEES LEGOUEST", contact: "", adresse: "RUE DES FRERES LACRETELLE", cp: "57070", ville: "METZ", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1423", societe: "SICAE EST", contact: "", adresse: "09 AVENUE DU LAC - BP 70159", cp: "70003", ville: "VESOUL", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1424", societe: "CENTRALE HYDROELECTRIQUE - EDF VOLGELGRUN", contact: "", adresse: "D52", cp: "68600", ville: "VOGELGRUN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1425", societe: "CAVE DE RIBEAUVILLE", contact: "", adresse: "02 ROUTE DE COLMAR", cp: "68150", ville: "RIBEAUVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1426", societe: "CAVE DE TURCKHEIM", contact: "", adresse: "1 RUE DES TUILERIES", cp: "68230", ville: "TURCKHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1427", societe: "VIN BIECHER", contact: "", adresse: "01 ROUTE DE RODERN", cp: "68590", ville: "SAINT-HYPPOLYTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1428", societe: "EHPAD LES VIOLETTES", contact: "", adresse: "22 FAUBOURG DE MULHOUSE", cp: "68260", ville: "KINGERSHEIM", email: "", telephone: "0389522770" },
-  { id: uid(), code: "CLI-1429", societe: "CAMPING DE MUHLENBACH", contact: "", adresse: "10 ROUTE DE MUHLENBACH", cp: "57230", ville: "STURZELBRONN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1430", societe: "CHOUCROUTERIE RIEFFEL", contact: "", adresse: "CHEMIN MONT SAINT ODILE", cp: "67880", ville: "KRAUTERGERSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1431", societe: "STABILO", contact: "", adresse: "07 RUE DES FRERES LUMIERES", cp: "67201", ville: "ECKBOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1432", societe: "SUEZ", contact: "", adresse: "ROUTE DE BEAUMONT", cp: "08240", ville: "SOMMAUTHE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1433", societe: "CENTRALE HYDROELECTRIQUE - EDF MARCKOLSHEIM", contact: "", adresse: "D424", cp: "67390", ville: "MARCKOLSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1434", societe: "FAIR'BELLE", contact: "", adresse: "RUE DES PINS", cp: "67318", ville: "WASSELONNE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1435", societe: "STEF TRANSPORT BISCHHEIM", contact: "", adresse: "19 RUE DE L'ATOME", cp: "67800", ville: "BISCHHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1436", societe: "TOTAL ENERGIES RELAIS L'OBRION", contact: "", adresse: "AUTOROUTE DE LORRAINE BOURGOGNE A31 - Aire l'Obrion", cp: "54700", ville: "LOISY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1437", societe: "TOTAL ENERGIES Aire d'Anthelupt", contact: "", adresse: "N333", cp: "54300", ville: "VITRIMONT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1438", societe: "PERRENOT TRANSPORTS", contact: "", adresse: "5 RUE DE L'EUROPE", cp: "54840", ville: "GONDREVILLE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1439", societe: "SMRC AUTOMOTIVE", contact: "", adresse: "90 AVENUE DE LATTRE DE TASSIGNY", cp: "90200", ville: "ROUGEGOUTTE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1440", societe: "BAT 12307 PARC DES FORGES B2", contact: "", adresse: "11 RUE MARIA DERAISMES", cp: "67200", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1441", societe: "PROFINE", contact: "", adresse: "RUE GUTLEUFELD", cp: "67440", ville: "MARMOUTIER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1442", societe: "ITW AUTOMOTIVE", contact: "", adresse: "2 RUE DU WITTHOLZ", cp: "67340", ville: "INGWILLER", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1443", societe: "CONSTRUCTION ELECTRIQUES DE BEAUCOURT (CEB)", contact: "", adresse: "RUE DE DAMPIERRE", cp: "90500", ville: "BEAUCOURT", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1444", societe: "BAT 11942 LAXOU", contact: "", adresse: "2 RUE DE LA VOLOGNE", cp: "54520", ville: "LAXOU", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1445", societe: "STEELCASE", contact: "", adresse: "RUE AUGUSTE LUMIERE", cp: "57400", ville: "SARREBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1446", societe: "SCI RED BEYOND - CHALET LIEZEY", contact: "", adresse: "13 ROUTE DU GRAND LIEZEY", cp: "88400", ville: "LIEZEY", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1447", societe: "HUSSON INTERNATIONAL", contact: "", adresse: "1 ROUTE DE L'EUROPE", cp: "68650", ville: "LAPOUTROIE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1448", societe: "APERAM", contact: "", adresse: "2 PLACE DU GENERAL DE GAULLE", cp: "25150", ville: "PONT-DE-ROIDE", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1449", societe: "STEP SARRE BLANCHE", contact: "", adresse: "BAN DE LA COMMUNE", cp: "57790", ville: "LANEUVILLE-LES-LORQUIN", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1450", societe: "SIL FALA", contact: "", adresse: "8 RUE DE SAINT NAZAIRE", cp: "67100", ville: "STRASBOURG", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1451", societe: "LAT NITROGEN", contact: "", adresse: "ZONE INDUSTRIELLE", cp: "68490", ville: "OTTMARSHEIM", email: "", telephone: "" },
-  { id: uid(), code: "CLI-1452", societe: "PSA - STELLANTIS", contact: "", adresse: "SITE DE TREMERY", cp: "57300", ville: "HAGONDANGE", email: "", telephone: "" },
-];
-
-const DEVIS_CONDITIONS_DEFAUT =
-  "Paiement selon les conditions indiquées ci-contre. Toute prestation supplémentaire fera l'objet d'un accord écrit. Le client garantit l'accès, la consignation et les conditions de sécurité du site. Les délais sont indicatifs sauf engagement écrit contraire.";
-
-const DEVIS_STATUTS = ["Brouillon", "Envoyé", "Accepté", "Refusé"];
-const FACTURE_STATUTS = ["À émettre", "Émise", "Payée"];
-const COMMANDE_STATUTS = ["Brouillon", "Envoyée", "Confirmée", "Reçue", "Annulée"];
-
-const STATUT_STYLE = {
-  Brouillon: "bg-slate-100 text-slate-600 border-slate-300",
-  Envoyé: "bg-sky-50 text-sky-700 border-sky-300",
-  Accepté: "bg-emerald-50 text-emerald-700 border-emerald-300",
-  Refusé: "bg-red-50 text-red-700 border-red-300",
-  "À émettre": "bg-slate-100 text-slate-600 border-slate-300",
-  Émise: "bg-sky-50 text-sky-700 border-sky-300",
-  Payée: "bg-emerald-50 text-emerald-700 border-emerald-300",
-  "En retard": "bg-red-50 text-red-700 border-red-300",
-  Envoyée: "bg-sky-50 text-sky-700 border-sky-300",
-  Confirmée: "bg-indigo-50 text-indigo-700 border-indigo-300",
-  Reçue: "bg-emerald-50 text-emerald-700 border-emerald-300",
-  Annulée: "bg-red-50 text-red-700 border-red-300",
+// heures = heures nv1-2 + heures nv3-4 + heures prépa (cumulées) — amort = amortissement matériel (€, fixe)
+// Pour chaque équipement : heuresSimple (niveau 1-2), heuresComplexe (niveau
+// 3-4) et heuresPrepa (préparation, comptée dans tous les niveaux), repris
+// du fichier source. niveauDefaut = niveau de prestation appliqué par défaut
+// dans un chiffrage (modifiable équipement par équipement dans le Chiffrage).
+const DEFAULT_CATALOGUE_TEMPS = {
+  hta: {
+    label: "Cellules HTA",
+    marquesRef: "ABB, Schneider Electric (SM6, FLUOKIT, PIX...), Siemens, CEM Gardy, Ormazabal, Pommier",
+    items: [
+      { id: "hta-interrupteur", label: "Interrupteur", heuresSimple: 0.7, heuresComplexe: 0.45, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "hta-interrupteur-rh", label: "Interrupteur avec relais homopolaire", heuresSimple: 0.7, heuresComplexe: 1.03, heuresPrepa: 0.2, amort: 21.18, niveauDefaut: "complet" },
+      { id: "hta-comptage", label: "Comptage", heuresSimple: 0.6, heuresComplexe: 0.72, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "hta-disj-630", label: "Disjoncteur ≤630A (standard)", heuresSimple: 0.93, heuresComplexe: 3.74, heuresPrepa: 0.5, amort: 57.18, niveauDefaut: "complet" },
+      { id: "hta-disj-800", label: "Disjoncteur ≥800A (gros calibres)", heuresSimple: 1.68, heuresComplexe: 3.92, heuresPrepa: 0.5, amort: 68.57, niveauDefaut: "complet" },
+      { id: "hta-inter-fusible", label: "Inter fusible", heuresSimple: 0.6, heuresComplexe: 0.72, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "hta-inter-fusible-rh", label: "Inter fusible avec relais homopolaire", heuresSimple: 0.6, heuresComplexe: 1.35, heuresPrepa: 0.2, amort: 23.88, niveauDefaut: "complet" },
+      { id: "hta-contacteur", label: "Contacteur", heuresSimple: 0.9, heuresComplexe: 1.9, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "hta-contacteur-rp", label: "Contacteur avec relais de protection", heuresSimple: 0.9, heuresComplexe: 2.6, heuresPrepa: 0.5, amort: 42.86, niveauDefaut: "complet" },
+    ],
+  },
+  transfo: {
+    label: "Transformateurs",
+    marquesRef: "",
+    items: [
+      { id: "tr-huile-2000", label: "Transfo huile ≤ 2000 kVA", heuresSimple: 2.58, heuresComplexe: 1.72, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "tr-huile-plus2000", label: "Transfo huile > 2000 kVA", heuresSimple: 3.64, heuresComplexe: 2.56, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "tr-prelevement", label: "Prélèvement seul", heuresSimple: 0, heuresComplexe: 1.0, heuresPrepa: 0, amort: 0, niveauDefaut: "complet" },
+      { id: "tr-sec-2000-nc", label: "Transfo sec ≤ 2000 kVA non capoté", heuresSimple: 2.73, heuresComplexe: 0.87, heuresPrepa: 0.1, amort: 58.5, niveauDefaut: "complet" },
+      { id: "tr-sec-plus2000-nc", label: "Transfo sec > 2000 kVA non capoté", heuresSimple: 3.64, heuresComplexe: 0.9, heuresPrepa: 0.1, amort: 73.78, niveauDefaut: "complet" },
+      { id: "tr-sec-2000-c", label: "Transfo sec ≤ 2000 kVA capoté", heuresSimple: 3.69, heuresComplexe: 1.31, heuresPrepa: 0.1, amort: 81.25, niveauDefaut: "complet" },
+      { id: "tr-sec-plus2000-c", label: "Transfo sec > 2000 kVA capoté", heuresSimple: 4.37, heuresComplexe: 1.83, heuresPrepa: 0.1, amort: 100.75, niveauDefaut: "complet" },
+    ],
+  },
+  btSecondaire: {
+    label: "Disjoncteurs BT — injection secondaire",
+    marquesRef: "Schneider (Masterpact, Compact NS/NSX), Eaton/Moeller, ABB SACE, Siemens, Legrand, GE",
+    items: [
+      { id: "bts-debro-630", label: "Disj débro ≤630A injection secondaire", heuresSimple: 0.61, heuresComplexe: 0.39, heuresPrepa: 0.2, amort: 25, niveauDefaut: "complet" },
+      { id: "bts-debro-3200", label: "Disj débro ≤3200A injection secondaire", heuresSimple: 1.22, heuresComplexe: 0.78, heuresPrepa: 0.2, amort: 50, niveauDefaut: "complet" },
+      { id: "bts-debro-4000", label: "Disj débro ≥4000A injection secondaire", heuresSimple: 2.02, heuresComplexe: 0.78, heuresPrepa: 0.2, amort: 70, niveauDefaut: "complet" },
+      { id: "bts-fixe-630", label: "Disj fixe ≤630A injection secondaire", heuresSimple: 0.26, heuresComplexe: 0.39, heuresPrepa: 0.2, amort: 16.25, niveauDefaut: "complet" },
+      { id: "bts-fixe-3200", label: "Disj fixe ≤3200A injection secondaire", heuresSimple: 0.62, heuresComplexe: 0.78, heuresPrepa: 0.2, amort: 35, niveauDefaut: "complet" },
+      { id: "bts-fixe-4000", label: "Disj fixe ≥4000A injection secondaire", heuresSimple: 0.97, heuresComplexe: 0.78, heuresPrepa: 0.2, amort: 43.75, niveauDefaut: "complet" },
+      { id: "bts-inter-debro-630", label: "Interrupteur débro ≤630A", heuresSimple: 0.61, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "bts-inter-debro-plus630", label: "Interrupteur débro >630A", heuresSimple: 1.22, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "bts-inter-fixe-630", label: "Interrupteur fixe ≤630A", heuresSimple: 0.26, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "bts-inter-fixe-plus630", label: "Interrupteur fixe >630A", heuresSimple: 0.62, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+      { id: "bts-tiroir-inj", label: "Tiroir injection secondaire", heuresSimple: 1.01, heuresComplexe: 0.39, heuresPrepa: 0.2, amort: 35, niveauDefaut: "complet" },
+      { id: "bts-tiroir-sans", label: "Tiroir sans injection", heuresSimple: 1.01, heuresComplexe: 0, heuresPrepa: 0.1, amort: 0, niveauDefaut: "complet" },
+    ],
+  },
+  btPrimaire: {
+    label: "Disjoncteurs BT — injection primaire",
+    marquesRef: "",
+    items: [
+      { id: "btp-debro-630", label: "Disj débro ≤630A injection primaire", heuresSimple: 0.61, heuresComplexe: 2.0, heuresPrepa: 0.25, amort: 112.36, niveauDefaut: "complet" },
+      { id: "btp-debro-3200", label: "Disj débro ≤3200A injection primaire", heuresSimple: 1.22, heuresComplexe: 2.3, heuresPrepa: 0.25, amort: 151.54, niveauDefaut: "complet" },
+      { id: "btp-debro-4000", label: "Disj débro ≥4000A injection primaire", heuresSimple: 2.02, heuresComplexe: 4.3, heuresPrepa: 0.25, amort: 272.09, niveauDefaut: "complet" },
+      { id: "btp-magneto-1250", label: "Disj magnéto-thermique ≤1250A primaire", heuresSimple: 2.5, heuresComplexe: 3.5, heuresPrepa: 0.5, amort: 258.31, niveauDefaut: "complet" },
+      { id: "btp-magneto-plus1250", label: "Disj magnéto-thermique >1250A primaire", heuresSimple: 3.0, heuresComplexe: 4.0, heuresPrepa: 0.5, amort: 301.36, niveauDefaut: "complet" },
+    ],
+  },
+  pfcRec: {
+    label: "Divers — compensateurs et redresseurs",
+    marquesRef: "",
+    items: [
+      { id: "pfc-bt-5", label: "PFC BT : 400V ≤ 5 gradins", heuresSimple: 0, heuresComplexe: 0, heuresPrepa: 2.8, amort: 0, niveauDefaut: "complet" },
+      { id: "pfc-bt-plus5", label: "PFC BT : 400V > 5 gradins", heuresSimple: 0, heuresComplexe: 0, heuresPrepa: 4.0, amort: 0, niveauDefaut: "complet" },
+      { id: "pfc-hta", label: "PFC HTA : 20kV ≤1500kvar / 5.5kV ≤150kvar", heuresSimple: 4.0, heuresComplexe: 4.0, heuresPrepa: 0, amort: 0, niveauDefaut: "complet" },
+      { id: "rec-c13", label: "REC type C13-100", heuresSimple: 0, heuresComplexe: 1.56, heuresPrepa: 0, amort: 0, niveauDefaut: "complet" },
+      { id: "rec-sces", label: "REC type SCES", heuresSimple: 0, heuresComplexe: 2.8, heuresPrepa: 0, amort: 0, niveauDefaut: "complet" },
+    ],
+  },
 };
 
-function StatusBadge({ statut }) {
+const DEFAULT_CATALOGUE_COEF = {
+  batteries: {
+    label: "Batteries",
+    unite: "par batterie",
+    categories: [
+      { id: "bat-a", label: "7 à 12 Ah", min: 7, max: 12, coef: 2.1 },
+      { id: "bat-b", label: "13 à 60 Ah", min: 13, max: 60, coef: 2.0 },
+      { id: "bat-c", label: "61 à 125 Ah", min: 61, max: 125, coef: 1.7 },
+      { id: "bat-d", label: "> 130 Ah", min: 130, max: Infinity, coef: 1.5 },
+    ],
+    critereLabel: "Capacité (Ah)",
+  },
+  composants: {
+    label: "Composants",
+    unite: "par composant",
+    categories: [
+      { id: "cmp-a", label: "1 € à 30 €", min: 1, max: 30, coef: 3.4 },
+      { id: "cmp-b", label: "30 € à 60 €", min: 30, max: 60, coef: 2.9 },
+      { id: "cmp-c", label: "60 € à 150 €", min: 60, max: 150, coef: 2.4 },
+      { id: "cmp-d", label: "> 150 €", min: 150, max: Infinity, coef: 2.2 },
+    ],
+    critereLabel: "Prix d'achat unitaire (€)",
+  },
+};
+
+// Catalogues à prix direct (pas de calcul heures × tarif) : analyses d'huile
+// et nettoyage TGBT, dont les prix du fichier source sont fixes.
+const DEFAULT_CATALOGUE_DIRECT = {
+  analyseHuile: {
+    label: "Analyses d'huile",
+    unite: "u",
+    items: [
+      { id: "ah-pa", label: "Analyse type PA", prix: 257.4 },
+      { id: "ah-b", label: "Analyse type B", prix: 378.4 },
+      { id: "ah-bdf", label: "Analyse type B + DF", prix: 552.2 },
+      { id: "ah-cdf", label: "Analyse type C + DF", prix: 744 },
+      { id: "ah-df", label: "Analyse type DF", prix: 286 },
+      { id: "ah-sf", label: "Analyse type SF (soufre corrosif)", prix: 154 },
+      { id: "ah-td", label: "Analyse type TD (tangente delta)", prix: 165 },
+      { id: "ah-pcb", label: "Analyse PCB", prix: 156 },
+    ],
+  },
+  tgbt: {
+    label: "TGBT — nettoyage",
+    unite: "m",
+    items: [
+      { id: "tgbt-resserage", label: "Nettoyage + resserrage (mètres)", prix: 600 },
+      { id: "tgbt-seul", label: "Nettoyage seul (mètres)", prix: 600 },
+    ],
+  },
+};
+
+// Familles pour les "lignes libres" (batteries, composants, poste manuel)
+const FAMILLES_LIBRES = [
+  { id: "batteries", label: "Batteries", type: "coef" },
+  { id: "composants", label: "Composants", type: "coef" },
+  { id: "manuel", label: "Poste libre (manuel)", type: "manuel" },
+];
+
+const LABEL_FAMILLE = {
+  hta: "Cellules HTA",
+  transfo: "Transformateurs",
+  btSecondaire: "Disjoncteurs BT (inj. secondaire)",
+  btPrimaire: "Disjoncteurs BT (inj. primaire)",
+  pfcRec: "Divers — PFC / redresseurs",
+  analyseHuile: "Analyses d'huile",
+  tgbt: "TGBT — nettoyage",
+  batteries: "Batteries",
+  composants: "Composants",
+  manuel: "Poste libre",
+};
+
+// Niveau de prestation réalisée sur l'équipement (pas le technicien) :
+// simple (1-2), complexe (3-4), ou complet (1-4 = simple + complexe).
+// La préparation est comptée dans tous les niveaux.
+const NIVEAUX_PRESTATION = {
+  simple: "Niveau 1-2 (simple)",
+  complexe: "Niveau 3-4 (complexe)",
+  complet: "Niveau 1-4 (complet)",
+};
+function heuresPourNiveau(item, niveau) {
+  if (niveau === "simple") return item.heuresSimple + item.heuresPrepa;
+  if (niveau === "complexe") return item.heuresComplexe + item.heuresPrepa;
+  return item.heuresSimple + item.heuresComplexe + item.heuresPrepa; // complet
+}
+
+function euros(n) {
+  if (!isFinite(n)) return "0 €";
+  return n.toLocaleString("fr-FR", { maximumFractionDigits: 0 }) + " €";
+}
+
+function findCoefCategory(catalogue, valeur) {
+  return catalogue.categories.find((c) => valeur >= c.min && valeur <= c.max) || catalogue.categories[0];
+}
+
+function nouveauPosteEquipement(n) {
+  return { id: uid(), nom: `Poste ${n}`, niveauTechnicien: "expert", typeJournee: "semaine", quantites: {}, niveaux: {} };
+}
+
+// ---------------------------------------------------------------------------
+
+function SectionCard({ title, icon: Icon, children, right, subtitle }) {
   return (
-    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border ${STATUT_STYLE[statut] || "bg-slate-100 text-slate-600 border-slate-300"}`}>
-      {statut}
+    <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 md:px-5 py-4" style={{ borderBottom: `1px solid ${LINE}` }}>
+        <div className="flex items-center gap-2">
+          {Icon && <Icon size={17} color={INK_2} />}
+          <div>
+            <h2 style={{ color: INK, fontWeight: 600, fontSize: 15 }}>{title}</h2>
+            {subtitle && <div style={{ color: MUTED, fontSize: 11.5 }}>{subtitle}</div>}
+          </div>
+        </div>
+        {right}
+      </div>
+      <div className="p-4 md:p-5">{children}</div>
+    </div>
+  );
+}
+
+// Champ numérique robuste : garde une saisie texte locale tant que le champ
+// a le focus (permet d'effacer, taper "1" puis "0" pour "10", virgule ou
+// point) et ne se resynchronise sur la valeur numérique qu'à la perte de
+// focus ou si la valeur change depuis l'extérieur.
+function NumberField({ value, onChange, suffix, width = 90 }) {
+  const [text, setText] = useState(String(value ?? 0));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setText(String(value ?? 0));
+  }, [value, focused]);
+
+  return (
+    <span className="inline-flex items-center gap-1">
+      <input
+        type="text"
+        inputMode="decimal"
+        value={text}
+        onFocus={() => setFocused(true)}
+        onChange={(e) => {
+          const raw = e.target.value;
+          if (raw === "" || /^-?\d*([.,]\d*)?$/.test(raw)) {
+            setText(raw);
+            const n = parseFloat(raw.replace(",", "."));
+            onChange(isNaN(n) ? 0 : n);
+          }
+        }}
+        onBlur={() => {
+          setFocused(false);
+          setText(String(value ?? 0));
+        }}
+        style={{
+          width,
+          border: `1px solid ${LINE}`,
+          borderRadius: 6,
+          padding: "5px 8px",
+          fontSize: 13,
+          fontVariantNumeric: "tabular-nums",
+          color: INK,
+          background: "#fff",
+          colorScheme: "light",
+        }}
+      />
+      {suffix && <span style={{ fontSize: 12, color: MUTED }}>{suffix}</span>}
     </span>
   );
 }
 
-/* ---------------------------------------------------------------------- */
-/* Storage layer                                                          */
-/* ---------------------------------------------------------------------- */
-
-async function loadKey(key, fallback) {
-  try {
-    const r = await window.storage.get(key, false);
-    return r && r.value ? JSON.parse(r.value) : fallback;
-  } catch (e) {
-    return fallback;
-  }
-}
-
-async function saveKey(key, value) {
-  await window.storage.set(key, JSON.stringify(value), false);
-}
-
-/* ---------------------------------------------------------------------- */
-/* Small UI primitives                                                    */
-/* ---------------------------------------------------------------------- */
-
-function Field({ label, children, className = "" }) {
+function TextField({ value, onChange, placeholder, style }) {
   return (
-    <label className={`flex flex-col gap-1 text-sm ${className}`}>
-      <span className="text-slate-500 font-medium">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-const inputCls =
-  "border border-slate-300 rounded-lg px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-400 bg-white";
-
-function TextInput(props) {
-  return <input {...props} className={`${inputCls} ${props.className || ""}`} />;
-}
-function Select(props) {
-  return <select {...props} className={`${inputCls} ${props.className || ""}`} />;
-}
-function TextArea(props) {
-  return <textarea {...props} className={`${inputCls} ${props.className || ""}`} />;
-}
-
-function Btn({ variant = "primary", className = "", ...props }) {
-  const variants = {
-    primary: "bg-amber-500 hover:bg-amber-600 text-slate-900 font-semibold",
-    dark: "bg-slate-900 hover:bg-slate-800 text-white font-semibold",
-    ghost: "bg-transparent hover:bg-slate-100 text-slate-700",
-    danger: "bg-transparent hover:bg-red-50 text-red-600",
-    outline: "bg-white hover:bg-slate-50 text-slate-700 border border-slate-300",
-  };
-  return (
-    <button
-      {...props}
-      className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${variants[variant]} ${className}`}
+    <input
+      type="text"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      style={{ border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 9px", fontSize: 13, color: INK, background: "#fff", colorScheme: "light", width: "100%", ...style }}
     />
   );
 }
 
-/* ---------------------------------------------------------------------- */
-/* Lines editor (shared by devis & facture forms)                         */
-/* ---------------------------------------------------------------------- */
-
-function LinesEditor({ lignes, setLignes, catalog }) {
-  const update = (id, patch) =>
-    setLignes(lignes.map((l) => (l.id === id ? { ...l, ...patch } : l)));
-
-  const remove = (id) => setLignes(lignes.filter((l) => l.id !== id));
-
-  const add = () =>
-    setLignes([
-      ...lignes,
-      { id: uid(), ref: "", designation: "", unite: "", qte: 1, puHT: 0, remise: 0 },
-    ]);
-
-  const applyCatalog = (id, ref) => {
-    const item = catalog.find((c) => c.ref === ref);
-    if (!item) return update(id, { ref });
-    update(id, {
-      ref: item.ref,
-      designation: item.designation,
-      unite: item.unite,
-      puHT: item.prixHT,
-    });
-  };
-
+function Select({ value, onChange, options, style }) {
   return (
-    <div className="border border-slate-200 rounded-xl overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm min-w-[640px]">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
-            <tr>
-              <th className="text-left px-3 py-2 w-40">Prestation</th>
-              <th className="text-left px-3 py-2">Désignation</th>
-              <th className="text-left px-3 py-2 w-24">Unité</th>
-              <th className="text-right px-3 py-2 w-20">Qté</th>
-              <th className="text-right px-3 py-2 w-24">PU HT</th>
-              <th className="text-right px-3 py-2 w-20">Remise %</th>
-              <th className="text-right px-3 py-2 w-28">Total HT</th>
-              <th className="w-8"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {lignes.map((l) => {
-              const ht = computeLineHT(l);
-              return (
-                <tr key={l.id} className="border-t border-slate-100">
-                  <td className="px-3 py-1.5">
-                    <Select
-                      value={l.ref}
-                      onChange={(e) => applyCatalog(l.id, e.target.value)}
-                      className="w-full py-1.5"
-                    >
-                      <option value="">— Libre —</option>
-                      {sortByRef(catalog.filter((c) => c.actif)).map((c) => (
-                        <option key={c.id} value={c.ref}>{c.ref}</option>
-                      ))}
-                    </Select>
-                  </td>
-                  <td className="px-3 py-1.5">
-                    <TextInput
-                      value={l.designation}
-                      onChange={(e) => update(l.id, { designation: e.target.value })}
-                      placeholder="Désignation"
-                      className="w-full py-1.5"
-                    />
-                  </td>
-                  <td className="px-3 py-1.5">
-                    <TextInput
-                      value={l.unite}
-                      onChange={(e) => update(l.id, { unite: e.target.value })}
-                      placeholder="Unité"
-                      className="w-full py-1.5"
-                    />
-                  </td>
-                  <td className="px-3 py-1.5">
-                    <TextInput
-                      type="number"
-                      value={l.qte}
-                      onChange={(e) => update(l.id, { qte: e.target.value })}
-                      className="w-full py-1.5 text-right"
-                    />
-                  </td>
-                  <td className="px-3 py-1.5">
-                    <TextInput
-                      type="number"
-                      value={l.puHT}
-                      onChange={(e) => update(l.id, { puHT: e.target.value })}
-                      className="w-full py-1.5 text-right"
-                    />
-                  </td>
-                  <td className="px-3 py-1.5">
-                    <TextInput
-                      type="number"
-                      value={l.remise}
-                      onChange={(e) => update(l.id, { remise: e.target.value })}
-                      className="w-full py-1.5 text-right"
-                    />
-                  </td>
-                  <td className="px-3 py-1.5 text-right font-medium text-slate-700 whitespace-nowrap">
-                    {money(ht)}
-                  </td>
-                  <td className="px-1">
-                    <button onClick={() => remove(l.id)} className="text-slate-400 hover:text-red-600 p-1">
-                      <Trash2 size={15} />
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-            {lignes.length === 0 && (
-              <tr>
-                <td colSpan={8} className="px-3 py-6 text-center text-slate-400 text-sm">
-                  Aucune ligne. Ajoutez une prestation.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      <div className="bg-slate-50 px-3 py-2">
-        <Btn variant="outline" onClick={add}>
-          <Plus size={15} /> Ajouter une ligne
-        </Btn>
-      </div>
-    </div>
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      style={{ border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 9px", fontSize: 13, color: INK, background: "#fff", colorScheme: "light", width: "100%", ...style }}
+    >
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
   );
 }
 
-/* ---------------------------------------------------------------------- */
-/* Printable document                                                     */
-/* ---------------------------------------------------------------------- */
-
-function PrintableDoc({ type, doc, client, chantier, settings, cgv, onClose }) {
-  const totals = computeTotals(doc.lignes, doc.remiseGlobale, settings.tauxTVA);
-  const isDevis = type === "devis";
-  const isCommande = type === "commande";
-  const docLabel = isDevis ? "du devis" : isCommande ? "de la commande" : "de la facture";
-  const partyLabel = isCommande ? "Fournisseur" : "Client";
-  const titleLabel = isDevis ? "DEVIS" : isCommande ? "BON DE COMMANDE" : (doc.type && doc.type !== "Complète" ? `FACTURE — ${doc.type.toUpperCase()}` : "FACTURE");
-
+// Table réutilisable pour un poste d'équipement (mêmes catalogues pour tous
+// les postes) — défini en dehors du composant principal pour ne pas être
+// recréé à chaque rendu (sinon React démonte/remonte tout le tableau à
+// chaque frappe, ce qui fait perdre le focus et remonter la page).
+function TableauCatalogue({ poste, catalogueTemps, catalogueDirect, setQtePoste, setNiveauPoste }) {
   return (
-    <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-start justify-center overflow-y-auto py-2 sm:py-8 px-0 sm:px-4 no-print-parent">
-      <style>{`
-        @media print {
-          body * { visibility: hidden; }
-          .print-area, .print-area * { visibility: visible; }
-          .print-area { position: absolute; top: 0; left: 0; width: 100%; padding: 0; margin: 0; box-shadow: none !important; }
-          .no-print { display: none !important; }
-          .cgv-annexe { page-break-before: always; break-before: page; }
-        }
-      `}</style>
-      <div className="bg-white w-full sm:max-w-3xl rounded-none sm:rounded-xl shadow-2xl print-area">
-        <div className="no-print flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 border-b border-slate-200 sticky top-0 bg-white z-10">
-          <span className="text-sm font-medium text-slate-500">
-            Aperçu {docLabel}
-          </span>
-          <div className="flex gap-2">
-            <Btn variant="outline" onClick={() => window.print()}>
-              <Printer size={15} /> Imprimer / PDF
-            </Btn>
-            <Btn variant="ghost" onClick={onClose}>
-              <X size={15} /> Fermer
-            </Btn>
+    <div className="flex flex-col gap-6">
+      {Object.entries(catalogueTemps).map(([famId, cat]) => (
+        <div key={famId}>
+          <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
+          <div className="overflow-x-auto">
+            <table className="w-full" style={{ fontSize: 13 }}>
+              <tbody>
+                {cat.items.map((item) => {
+                  const qte = poste.quantites[item.id] || 0;
+                  const niveau = (poste.niveaux && poste.niveaux[item.id]) || item.niveauDefaut || "complet";
+                  return (
+                    <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                      <td className="py-2 pr-3" style={{ color: INK }}>
+                        {item.label}
+                      </td>
+                      <td className="py-2 pr-3 text-right" style={{ width: 170 }}>
+                        {qte > 0 && (
+                          <Select
+                            value={niveau}
+                            onChange={(v) => setNiveauPoste(poste.id, item.id, v)}
+                            options={Object.entries(NIVEAUX_PRESTATION).map(([k, label]) => ({ value: k, label }))}
+                            style={{ fontSize: 12, padding: "4px 6px" }}
+                          />
+                        )}
+                      </td>
+                      <td className="py-2 text-right" style={{ width: 90 }}>
+                        <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix="u" width={64} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
+      ))}
 
-        <div className="p-4 sm:p-8">
-          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
-            <div>
-              {settings.logoDataUrl ? (
-                <img src={settings.logoDataUrl} alt={settings.entreprise} className="h-12 max-w-[200px] object-contain mb-1" />
-              ) : (
-                <div className="flex items-center gap-2 text-slate-900 font-bold text-xl">
-                  <Zap size={20} className="text-amber-500" /> {settings.entreprise}
-                </div>
-              )}
-              <p className="text-xs text-slate-500 mt-1">Maintenance industrielle • Expertise • Fiabilité</p>
-              <div className="text-xs text-slate-500 mt-2 leading-relaxed">
-                {settings.adresse && <div>{settings.adresse}</div>}
-                {(settings.cp || settings.ville) && <div>{settings.cp} {settings.ville}</div>}
-                {settings.telephone && <div>{settings.telephone}</div>}
-                {settings.email && <div>{settings.email}</div>}
-                {settings.siret && <div>SIRET : {settings.siret}</div>}
-              </div>
-            </div>
-            <div className="text-right">
-              <div className="text-2xl font-bold text-slate-900">{titleLabel}</div>
-              <div className="text-sm text-slate-600 mt-1">N° {doc.numero}</div>
-              <div className="text-xs text-slate-500 mt-1">
-                Date : {fmtDate(isDevis || isCommande ? doc.date : doc.dateEmission)}
-              </div>
-              {isDevis ? (
-                <div className="text-xs text-slate-500">Validité : {doc.validiteJours} jours</div>
-              ) : isCommande ? (
-                doc.delaiLivraison && <div className="text-xs text-slate-500">Délai souhaité : {doc.delaiLivraison}</div>
-              ) : (
-                <div className="text-xs text-slate-500">Échéance : {fmtDate(doc.echeance)}</div>
-              )}
-              <div className="mt-2"><StatusBadge statut={doc.statut} /></div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 mb-6 text-xs">
-            <div className="bg-slate-50 rounded-lg p-3">
-              <div className="text-slate-400 uppercase tracking-wide font-semibold mb-1">{partyLabel}</div>
-              <div className="font-medium text-slate-800">{isCommande ? (client?.raisonSociale || "—") : (client?.societe || "—")}</div>
-              <div className="text-slate-500">{client?.contact}</div>
-              <div className="text-slate-500">{client?.adresse}</div>
-              <div className="text-slate-500">{client?.cp} {client?.ville}</div>
-              <div className="text-slate-500">{client?.email}</div>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3">
-              <div className="text-slate-400 uppercase tracking-wide font-semibold mb-1">Objet</div>
-              <div className="text-slate-700">{doc.objet || "—"}</div>
-              {!isDevis && !isCommande && doc.refDevisNumero && (
-                <div className="text-slate-500 mt-1">Réf. devis : {doc.refDevisNumero}</div>
-              )}
-              {isDevis && doc.refClient && (
-                <div className="text-slate-500 mt-1">Réf. client : {doc.refClient}</div>
-              )}
-              {isCommande && doc.refCommandeFournisseur && (
-                <div className="text-slate-500 mt-1">Réf. fournisseur : {doc.refCommandeFournisseur}</div>
-              )}
-              {isCommande && (chantier || doc.chantierRepere) && (
-                <div className="text-slate-500 mt-1">
-                  Chantier : {chantier?.societe}{chantier && doc.chantierRepere ? " — " : ""}{doc.chantierRepere}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <table className="w-full text-xs mb-4">
-            <thead>
-              <tr className="border-b-2 border-slate-800 text-slate-500 uppercase text-[10px] tracking-wide">
-                <th className="text-left py-1.5">Désignation</th>
-                <th className="text-left py-1.5">Unité</th>
-                <th className="text-right py-1.5">Qté</th>
-                <th className="text-right py-1.5">PU HT</th>
-                <th className="text-right py-1.5">Remise</th>
-                <th className="text-right py-1.5">Total HT</th>
-              </tr>
-            </thead>
-            <tbody>
-              {doc.lignes.map((l) => {
-                const ht = computeLineHT(l);
-                return (
-                  <tr key={l.id} className="border-b border-slate-100">
-                    <td className="py-1.5">{l.designation}</td>
-                    <td className="py-1.5">{l.unite}</td>
-                    <td className="py-1.5 text-right">{l.qte}</td>
-                    <td className="py-1.5 text-right">{money(Number(l.puHT))}</td>
-                    <td className="py-1.5 text-right">{l.remise ? `${l.remise}%` : "—"}</td>
-                    <td className="py-1.5 text-right font-medium">{money(ht)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-
-          <div className="flex justify-end mb-6">
-            <div className="w-56 text-xs space-y-1">
-              <div className="flex justify-between text-slate-500">
-                <span>Sous-total HT</span><span>{money(totals.sousTotal)}</span>
-              </div>
-              <div className="flex justify-between text-slate-500">
-                <span>Remise globale</span><span>{money(totals.remiseGlobale)}</span>
-              </div>
-              <div className="flex justify-between text-slate-700 font-medium">
-                <span>Total HT</span><span>{money(totals.totalHT)}</span>
-              </div>
-              <div className="flex justify-between text-slate-500">
-                <span>TVA ({(Number(settings.tauxTVA) * 100).toFixed(0)}%)</span><span>{money(totals.tva)}</span>
-              </div>
-              <div className="flex justify-between text-slate-900 font-bold text-sm border-t border-slate-800 pt-1 mt-1">
-                <span>TOTAL TTC</span><span>{money(totals.ttc)}</span>
-              </div>
-            </div>
-          </div>
-
-          {isDevis ? (
-            <>
-              <div className="text-xs text-slate-500 leading-relaxed border-t border-slate-200 pt-3 mb-4">
-                {doc.conditions}
-              </div>
-              <div className="text-xs bg-slate-50 rounded-lg p-3 mb-4">
-                <div className="font-semibold text-slate-700 mb-1">Acceptation du devis et des CGV</div>
-                <p className="text-slate-500">
-                  Le client reconnaît avoir pris connaissance et accepter le présent devis et les Conditions
-                  Générales de Vente {settings.entreprise}. Mention manuscrite recommandée : « Bon pour accord,
-                  devis et CGV acceptés ».
-                </p>
-                <div className="grid grid-cols-3 gap-4 mt-4 text-slate-400">
-                  <div>Nom et qualité du signataire :</div>
-                  <div>Date :</div>
-                  <div>Cachet et signature :</div>
-                </div>
-              </div>
-              {cgv && (
-                <div className="cgv-annexe pt-6 mt-2 border-t-2 border-slate-800">
-                  <div className="text-sm font-bold text-slate-900 mb-1">CONDITIONS GÉNÉRALES DE VENTE</div>
-                  <div className="text-[10px] text-slate-500 mb-4">Version {settings.versionCGV} — {settings.entreprise} — annexées et applicables au présent devis</div>
-                  <p className="text-[11px] text-slate-600 leading-relaxed mb-3">{cgv.intro}</p>
-                  <div className="space-y-2.5">
-                    {cgv.articles.map((a, i) => (
-                      <div key={i}>
-                        <div className="font-semibold text-slate-800 text-[11px] mb-0.5">{a.titre}</div>
-                        <p className="text-[11px] text-slate-600 leading-relaxed">{a.texte}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
-          ) : isCommande ? (
-            <div className="text-xs text-slate-500 leading-relaxed border-t border-slate-200 pt-3 mb-4">
-              {doc.conditions}
-            </div>
-          ) : (
-            <div className="text-xs bg-slate-50 rounded-lg p-3 mb-4 space-y-1">
-              <div className="text-slate-500">
-                Paiement : {settings.delaiPaiement}. {settings.escompte}. En cas de retard, pénalités exigibles
-                sans rappel préalable au taux : {settings.tauxPenalites}. Indemnité forfaitaire de recouvrement :
-                {" "}{money(settings.indemniteRecouvrement)} par facture en retard.
-              </div>
-              <div className="grid grid-cols-2 gap-2 pt-2 text-slate-600">
-                <div>IBAN : {settings.iban || "À compléter"}</div>
-                <div>BIC : {settings.bic || "À compléter"}</div>
-              </div>
-            </div>
-          )}
-
-          <div className="text-[10px] text-slate-400 text-center border-t border-slate-200 pt-2">
-            CGV {settings.versionCGV} applicables — {settings.entreprise}
-            {settings.tvaNum ? ` — N° TVA ${settings.tvaNum}` : ""}
+      {Object.entries(catalogueDirect).map(([famId, cat]) => (
+        <div key={famId}>
+          <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{cat.label}</div>
+          <div className="overflow-x-auto">
+            <table className="w-full" style={{ fontSize: 13 }}>
+              <tbody>
+                {cat.items.map((item) => {
+                  const qte = poste.quantites[item.id] || 0;
+                  return (
+                    <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                      <td className="py-2 pr-3" style={{ color: INK }}>
+                        {item.label}
+                      </td>
+                      <td className="py-2 text-right" style={{ width: 90 }}>
+                        <NumberField value={qte} onChange={(v) => setQtePoste(poste.id, item.id, v)} suffix={cat.unite} width={64} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
-      </div>
+      ))}
     </div>
   );
 }
 
-/* ---------------------------------------------------------------------- */
-/* Devis form                                                             */
-/* ---------------------------------------------------------------------- */
+// ---------------------------------------------------------------------------
 
-function DevisForm({ initial, clients, catalog, devisList, settings, onSave, onCancel }) {
-  const [doc, setDoc] = useState(
-    initial || {
-      id: uid(),
-      numero: nextNumber(devisList, settings.numPrefixDevis || "DEV", "numero", settings.numAgencePrefix, settings.numDebutAnneeFiscale),
-      date: today(),
-      validiteJours: 30,
-      statut: "Brouillon",
-      clientId: clients[0]?.id || "",
-      objet: "Intervention de maintenance",
-      refClient: "",
-      lignes: [],
-      remiseGlobale: 0,
-      conditions: DEVIS_CONDITIONS_DEFAUT,
-    }
-  );
+export default function ChiffrageHTMaintenance() {
+  const [tab, setTab] = useState("chiffrage");
 
-  const totals = computeTotals(doc.lignes, doc.remiseGlobale, settings.tauxTVA);
-
-  return (
-    <div className="bg-white border border-slate-200 rounded-xl p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="font-semibold text-slate-800 flex items-center gap-2">
-          <FileText size={18} className="text-amber-500" />
-          {initial ? `Modifier ${doc.numero}` : "Nouveau devis"}
-        </h3>
-        <Btn variant="ghost" onClick={onCancel}><ChevronLeft size={15} /> Retour à la liste</Btn>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-        <Field label="Numéro">
-          <TextInput value={doc.numero} disabled />
-        </Field>
-        <Field label="Date">
-          <TextInput type="date" value={doc.date} onChange={(e) => setDoc({ ...doc, date: e.target.value })} />
-        </Field>
-        <Field label="Validité (jours)">
-          <TextInput type="number" value={doc.validiteJours} onChange={(e) => setDoc({ ...doc, validiteJours: e.target.value })} />
-        </Field>
-        <Field label="Statut">
-          <Select value={doc.statut} onChange={(e) => setDoc({ ...doc, statut: e.target.value })}>
-            {DEVIS_STATUTS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </Select>
-        </Field>
-        <Field label="Client" className="md:col-span-2">
-          <Select value={doc.clientId} onChange={(e) => setDoc({ ...doc, clientId: e.target.value })}>
-            <option value="">— Sélectionner —</option>
-            {clients.map((c) => <option key={c.id} value={c.id}>{c.societe} ({c.code})</option>)}
-          </Select>
-        </Field>
-        <Field label="Objet" className="md:col-span-2">
-          <TextInput value={doc.objet} onChange={(e) => setDoc({ ...doc, objet: e.target.value })} />
-        </Field>
-        <Field label="Référence client" className="md:col-span-2">
-          <TextInput value={doc.refClient} onChange={(e) => setDoc({ ...doc, refClient: e.target.value })} />
-        </Field>
-      </div>
-
-      <LinesEditor lignes={doc.lignes} setLignes={(l) => setDoc({ ...doc, lignes: l })} catalog={catalog} />
-
-      <div className="flex flex-col md:flex-row gap-4 mt-4">
-        <Field label="Conditions particulières / observations" className="flex-1">
-          <TextArea rows={4} value={doc.conditions} onChange={(e) => setDoc({ ...doc, conditions: e.target.value })} />
-        </Field>
-        <div className="w-full md:w-64 bg-slate-50 rounded-lg p-4 text-sm space-y-1.5 h-fit">
-          <div className="flex justify-between text-slate-500"><span>Sous-total HT</span><span>{money(totals.sousTotal)}</span></div>
-          <Field label="">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-slate-500">Remise globale</span>
-              <TextInput type="number" value={doc.remiseGlobale} onChange={(e) => setDoc({ ...doc, remiseGlobale: e.target.value })} className="w-24 py-1 text-right" />
-            </div>
-          </Field>
-          <div className="flex justify-between text-slate-700 font-medium"><span>Total HT</span><span>{money(totals.totalHT)}</span></div>
-          <div className="flex justify-between text-slate-500"><span>TVA ({(Number(settings.tauxTVA) * 100).toFixed(0)}%)</span><span>{money(totals.tva)}</span></div>
-          <div className="flex justify-between text-slate-900 font-bold border-t border-slate-300 pt-1.5 mt-1.5"><span>TOTAL TTC</span><span>{money(totals.ttc)}</span></div>
-        </div>
-      </div>
-
-      <div className="flex justify-end gap-2 mt-5">
-        <Btn variant="outline" onClick={onCancel}>Annuler</Btn>
-        <Btn variant="primary" onClick={() => onSave(doc)}><Check size={15} /> Enregistrer le devis</Btn>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* Facture form                                                           */
-/* ---------------------------------------------------------------------- */
-
-function FactureForm({ initial, clients, catalog, facturesList, settings, onSave, onCancel }) {
-  const [doc, setDoc] = useState(
-    initial || {
-      id: uid(),
-      numero: nextNumber(facturesList, settings.numPrefixFacture || "FAC", "numero", settings.numAgencePrefix, settings.numDebutAnneeFiscale),
-      dateEmission: today(),
-      echeance: addDays(today(), parseDelaiJours(settings.delaiPaiement)),
-      statut: "À émettre",
-      refDevisId: "",
-      refDevisNumero: "",
-      type: "Complète",
-      clientId: clients[0]?.id || "",
-      objet: "Intervention de maintenance",
-      lignes: [],
-      remiseGlobale: 0,
-    }
-  );
-
-  const totals = computeTotals(doc.lignes, doc.remiseGlobale, settings.tauxTVA);
-
-  return (
-    <div className="bg-white border border-slate-200 rounded-xl p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="font-semibold text-slate-800 flex items-center gap-2">
-          <Receipt size={18} className="text-amber-500" />
-          {initial ? `Modifier ${doc.numero}` : "Nouvelle facture"}
-        </h3>
-        <Btn variant="ghost" onClick={onCancel}><ChevronLeft size={15} /> Retour à la liste</Btn>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-        <Field label="Numéro"><TextInput value={doc.numero} disabled /></Field>
-        <Field label="Date d'émission">
-          <TextInput type="date" value={doc.dateEmission} onChange={(e) => setDoc({ ...doc, dateEmission: e.target.value })} />
-        </Field>
-        <Field label="Échéance">
-          <TextInput type="date" value={doc.echeance} onChange={(e) => setDoc({ ...doc, echeance: e.target.value })} />
-        </Field>
-        <Field label="Statut">
-          <Select value={doc.statut} onChange={(e) => setDoc({ ...doc, statut: e.target.value })}>
-            {FACTURE_STATUTS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </Select>
-        </Field>
-        <Field label="Type de facture">
-          <Select value={doc.type || "Complète"} onChange={(e) => setDoc({ ...doc, type: e.target.value })}>
-            <option value="Complète">Complète</option>
-            <option value="Acompte">Acompte</option>
-            <option value="Solde">Solde</option>
-          </Select>
-        </Field>
-        <Field label="Client" className="md:col-span-2">
-          <Select value={doc.clientId} onChange={(e) => setDoc({ ...doc, clientId: e.target.value })}>
-            <option value="">— Sélectionner —</option>
-            {clients.map((c) => <option key={c.id} value={c.id}>{c.societe} ({c.code})</option>)}
-          </Select>
-        </Field>
-        <Field label="Objet" className="md:col-span-2">
-          <TextInput value={doc.objet} onChange={(e) => setDoc({ ...doc, objet: e.target.value })} />
-        </Field>
-      </div>
-      {doc.refDevisNumero && (
-        <div className="text-xs text-slate-500 mb-4">
-          Issue du devis {doc.refDevisNumero}{doc.type && doc.type !== "Complète" ? ` — ${doc.type}` : ""}
-        </div>
-      )}
-
-      <LinesEditor lignes={doc.lignes} setLignes={(l) => setDoc({ ...doc, lignes: l })} catalog={catalog} />
-
-      <div className="flex justify-end mt-4">
-        <div className="w-full md:w-64 bg-slate-50 rounded-lg p-4 text-sm space-y-1.5">
-          <div className="flex justify-between text-slate-500"><span>Sous-total HT</span><span>{money(totals.sousTotal)}</span></div>
-          <Field label="">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-slate-500">Remise globale</span>
-              <TextInput type="number" value={doc.remiseGlobale} onChange={(e) => setDoc({ ...doc, remiseGlobale: e.target.value })} className="w-24 py-1 text-right" />
-            </div>
-          </Field>
-          <div className="flex justify-between text-slate-700 font-medium"><span>Total HT</span><span>{money(totals.totalHT)}</span></div>
-          <div className="flex justify-between text-slate-500"><span>TVA ({(Number(settings.tauxTVA) * 100).toFixed(0)}%)</span><span>{money(totals.tva)}</span></div>
-          <div className="flex justify-between text-slate-900 font-bold border-t border-slate-300 pt-1.5 mt-1.5"><span>TOTAL TTC</span><span>{money(totals.ttc)}</span></div>
-        </div>
-      </div>
-
-      <div className="flex justify-end gap-2 mt-5">
-        <Btn variant="outline" onClick={onCancel}>Annuler</Btn>
-        <Btn variant="primary" onClick={() => onSave(doc)}><Check size={15} /> Enregistrer la facture</Btn>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* Devis tab                                                              */
-/* ---------------------------------------------------------------------- */
-
-function DevisTab({ devisList, saveDevisList, clients, catalog, settings, facturesList, saveFacturesList, openPreview }) {
-  const [editing, setEditing] = useState(null); // null | 'new' | devis object
-  const [query, setQuery] = useState("");
-  const [converting, setConverting] = useState(null); // devis being converted
-
-  const clientName = (id) => clients.find((c) => c.id === id)?.societe || "—";
-
-  const filtered = devisList.filter((d) =>
-    `${d.numero} ${clientName(d.clientId)} ${d.objet}`.toLowerCase().includes(query.toLowerCase())
-  );
-
-  const handleSave = (doc) => {
-    const exists = devisList.some((d) => d.id === doc.id);
-    const updated = exists ? devisList.map((d) => (d.id === doc.id ? doc : d)) : [doc, ...devisList];
-    saveDevisList(updated);
-    setEditing(null);
-  };
-
-  const remove = (id) => {
-    if (!confirm("Supprimer ce devis ?")) return;
-    saveDevisList(devisList.filter((d) => d.id !== id));
-  };
-
-  const duplicate = (d) => {
-    const copy = { ...d, id: uid(), numero: nextNumber(devisList, settings.numPrefixDevis || "DEV", "numero", settings.numAgencePrefix, settings.numDebutAnneeFiscale), date: today(), statut: "Brouillon" };
-    saveDevisList([copy, ...devisList]);
-  };
-
-  const doConvert = (d, type, pourcentage) => {
-    const devisTotals = computeTotals(d.lignes, d.remiseGlobale, settings.tauxTVA);
-    let lignes;
-    if (type === "Complète") {
-      lignes = d.lignes.map((l) => ({ ...l, id: uid() }));
-    } else if (type === "Acompte") {
-      const montantHT = devisTotals.totalHT * (Number(pourcentage) / 100);
-      lignes = [{ id: uid(), ref: "", designation: `Acompte de ${pourcentage}% sur devis ${d.numero}`, unite: "Forfait", qte: 1, puHT: montantHT, remise: 0 }];
-    } else {
-      const dejaFacture = facturesList
-        .filter((f) => f.refDevisId === d.id)
-        .reduce((s, f) => s + computeTotals(f.lignes, f.remiseGlobale, settings.tauxTVA).totalHT, 0);
-      const montantHT = Math.max(devisTotals.totalHT - dejaFacture, 0);
-      lignes = [{ id: uid(), ref: "", designation: `Solde sur devis ${d.numero}`, unite: "Forfait", qte: 1, puHT: montantHT, remise: 0 }];
-    }
-    const facture = {
-      id: uid(),
-      numero: nextNumber(facturesList, settings.numPrefixFacture || "FAC", "numero", settings.numAgencePrefix, settings.numDebutAnneeFiscale),
-      dateEmission: today(),
-      echeance: addDays(today(), parseDelaiJours(settings.delaiPaiement)),
-      statut: "À émettre",
-      refDevisId: d.id,
-      refDevisNumero: d.numero,
-      type,
-      clientId: d.clientId,
-      objet: d.objet,
-      lignes,
-      remiseGlobale: 0,
-    };
-    saveFacturesList([facture, ...facturesList]);
-    setConverting(null);
-    alert(`Facture ${facture.numero} (${type}) créée à partir du devis ${d.numero}.`);
-  };
-
-  if (editing) {
-    return (
-      <DevisForm
-        initial={editing === "new" ? null : editing}
-        clients={clients}
-        catalog={catalog}
-        devisList={devisList}
-        settings={settings}
-        onSave={handleSave}
-        onCancel={() => setEditing(null)}
-      />
-    );
-  }
-
-  return (
-    <div>
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-        <div className="relative w-full sm:w-72">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un devis…" className="pl-9 w-full" />
-        </div>
-        <Btn variant="primary" onClick={() => setEditing("new")}><Plus size={15} /> Nouveau devis</Btn>
-      </div>
-
-      {converting && (
-        <ConvertModal devis={converting} onCancel={() => setConverting(null)} onConfirm={doConvert} />
-      )}
-
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
-            <tr>
-              <th className="text-left px-4 py-2.5">Numéro</th>
-              <th className="text-left px-4 py-2.5">Client</th>
-              <th className="text-left px-4 py-2.5">Date</th>
-              <th className="text-left px-4 py-2.5">Statut</th>
-              <th className="text-right px-4 py-2.5">Total TTC</th>
-              <th className="text-right px-4 py-2.5">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((d) => {
-              const t = computeTotals(d.lignes, d.remiseGlobale, settings.tauxTVA);
-              return (
-                <tr key={d.id} className="border-t border-slate-100 hover:bg-slate-50">
-                  <td className="px-4 py-2.5 font-medium text-slate-800">{d.numero}</td>
-                  <td className="px-4 py-2.5 text-slate-600">{clientName(d.clientId)}</td>
-                  <td className="px-4 py-2.5 text-slate-500">{fmtDate(d.date)}</td>
-                  <td className="px-4 py-2.5"><StatusBadge statut={d.statut} /></td>
-                  <td className="px-4 py-2.5 text-right font-medium text-slate-800">{money(t.ttc)}</td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex justify-end gap-1">
-                      <button title="Aperçu / Imprimer" onClick={() => openPreview("devis", d)} className="p-1.5 text-slate-400 hover:text-amber-600"><Printer size={15} /></button>
-                      <button title="Modifier" onClick={() => setEditing(d)} className="p-1.5 text-slate-400 hover:text-slate-700"><Pencil size={15} /></button>
-                      <button title="Dupliquer" onClick={() => duplicate(d)} className="p-1.5 text-slate-400 hover:text-slate-700"><Copy size={15} /></button>
-                      <button title="Convertir en facture" onClick={() => setConverting(d)} className="p-1.5 text-slate-400 hover:text-emerald-600"><ArrowRightLeft size={15} /></button>
-                      <button title="Supprimer" onClick={() => remove(d.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 size={15} /></button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-            {filtered.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400">Aucun devis pour le moment.</td></tr>
-            )}
-          </tbody>
-        </table>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ConvertModal({ devis, onCancel, onConfirm }) {
-  const [type, setType] = useState("Complète");
-  const [pourcentage, setPourcentage] = useState(30);
-
-  return (
-    <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center px-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
-        <h3 className="font-semibold text-slate-800 mb-1">Convertir {devis.numero} en facture</h3>
-        <p className="text-xs text-slate-500 mb-4">Choisissez le type de facture à générer.</p>
-        <div className="space-y-2 mb-4">
-          {[
-            ["Complète", "Facture complète (toutes les lignes du devis)"],
-            ["Acompte", "Facture d'acompte (% du montant HT)"],
-            ["Solde", "Facture de solde (reste dû après acomptes déjà facturés)"],
-          ].map(([val, label]) => (
-            <label key={val} className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-              <input type="radio" name="convert-type" checked={type === val} onChange={() => setType(val)} />
-              {label}
-            </label>
-          ))}
-        </div>
-        {type === "Acompte" && (
-          <Field label="Pourcentage de l'acompte" className="mb-4">
-            <TextInput type="number" value={pourcentage} onChange={(e) => setPourcentage(e.target.value)} />
-          </Field>
-        )}
-        <div className="flex justify-end gap-2">
-          <Btn variant="outline" onClick={onCancel}>Annuler</Btn>
-          <Btn variant="primary" onClick={() => onConfirm(devis, type, pourcentage)}><Check size={15} /> Créer la facture</Btn>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* Facture tab                                                            */
-/* ---------------------------------------------------------------------- */
-
-function FacturesTab({ facturesList, saveFacturesList, clients, catalog, settings, openPreview }) {
-  const [editing, setEditing] = useState(null);
-  const [query, setQuery] = useState("");
-
-  const clientName = (id) => clients.find((c) => c.id === id)?.societe || "—";
-
-  const effectiveStatut = (f) => {
-    if (f.statut === "Payée") return "Payée";
-    if (f.echeance && f.echeance < today()) return "En retard";
-    return f.statut;
-  };
-
-  const filtered = facturesList.filter((f) =>
-    `${f.numero} ${clientName(f.clientId)} ${f.objet}`.toLowerCase().includes(query.toLowerCase())
-  );
-
-  const handleSave = (doc) => {
-    const exists = facturesList.some((f) => f.id === doc.id);
-    const updated = exists ? facturesList.map((f) => (f.id === doc.id ? doc : f)) : [doc, ...facturesList];
-    saveFacturesList(updated);
-    setEditing(null);
-  };
-
-  const remove = (id) => {
-    if (!confirm("Supprimer cette facture ?")) return;
-    saveFacturesList(facturesList.filter((f) => f.id !== id));
-  };
-
-  const markPaid = (f) => {
-    saveFacturesList(facturesList.map((x) => (x.id === f.id ? { ...x, statut: "Payée" } : x)));
-  };
-
-  if (editing) {
-    return (
-      <FactureForm
-        initial={editing === "new" ? null : editing}
-        clients={clients}
-        catalog={catalog}
-        facturesList={facturesList}
-        settings={settings}
-        onSave={handleSave}
-        onCancel={() => setEditing(null)}
-      />
-    );
-  }
-
-  return (
-    <div>
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-        <div className="relative w-full sm:w-72">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher une facture…" className="pl-9 w-full" />
-        </div>
-        <Btn variant="primary" onClick={() => setEditing("new")}><Plus size={15} /> Nouvelle facture</Btn>
-      </div>
-
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
-            <tr>
-              <th className="text-left px-4 py-2.5">Numéro</th>
-              <th className="text-left px-4 py-2.5">Client</th>
-              <th className="text-left px-4 py-2.5">Échéance</th>
-              <th className="text-left px-4 py-2.5">Statut</th>
-              <th className="text-right px-4 py-2.5">Total TTC</th>
-              <th className="text-right px-4 py-2.5">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((f) => {
-              const t = computeTotals(f.lignes, f.remiseGlobale, settings.tauxTVA);
-              const st = effectiveStatut(f);
-              return (
-                <tr key={f.id} className="border-t border-slate-100 hover:bg-slate-50">
-                  <td className="px-4 py-2.5 font-medium text-slate-800">
-                    {f.numero}
-                    {f.type && f.type !== "Complète" && (
-                      <span className="ml-1.5 text-[10px] font-normal text-slate-400 align-middle">({f.type})</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2.5 text-slate-600">{clientName(f.clientId)}</td>
-                  <td className="px-4 py-2.5 text-slate-500">{fmtDate(f.echeance)}</td>
-                  <td className="px-4 py-2.5"><StatusBadge statut={st} /></td>
-                  <td className="px-4 py-2.5 text-right font-medium text-slate-800">{money(t.ttc)}</td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex justify-end gap-1">
-                      {st !== "Payée" && (
-                        <button title="Marquer comme payée" onClick={() => markPaid(f)} className="p-1.5 text-slate-400 hover:text-emerald-600"><CircleDollarSign size={15} /></button>
-                      )}
-                      <button title="Aperçu / Imprimer" onClick={() => openPreview("facture", f)} className="p-1.5 text-slate-400 hover:text-amber-600"><Printer size={15} /></button>
-                      <button title="Modifier" onClick={() => setEditing(f)} className="p-1.5 text-slate-400 hover:text-slate-700"><Pencil size={15} /></button>
-                      <button title="Supprimer" onClick={() => remove(f.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 size={15} /></button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-            {filtered.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400">Aucune facture pour le moment.</td></tr>
-            )}
-          </tbody>
-        </table>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* Commande d'achat fournisseur (bon de commande)                         */
-/* ---------------------------------------------------------------------- */
-
-function CommandeForm({ initial, fournisseurs, clients, commandesList, settings, onSave, onCancel }) {
-  const [doc, setDoc] = useState(
-    initial || {
-      id: uid(),
-      numero: nextNumber(commandesList, settings.numPrefixCommande || "CDA", "numero", settings.numAgencePrefix, settings.numDebutAnneeFiscale),
-      date: today(),
-      statut: "Brouillon",
-      fournisseurId: fournisseurs[0]?.id || "",
-      objet: "Pièces détachées",
-      refCommandeFournisseur: "",
-      delaiLivraison: "",
-      chantierId: "",
-      chantierRepere: "",
-      lignes: [],
-      remiseGlobale: 0,
-      conditions: "Livraison à l'adresse de HT Maintenance sauf indication contraire. Merci de confirmer la commande et le délai de livraison par retour.",
-    }
-  );
-  const [linkChantier, setLinkChantier] = useState(Boolean(initial && (initial.chantierId || initial.chantierRepere)));
-
-  const totals = computeTotals(doc.lignes, doc.remiseGlobale, settings.tauxTVA);
-
-  const toggleChantier = (checked) => {
-    setLinkChantier(checked);
-    if (!checked) setDoc({ ...doc, chantierId: "", chantierRepere: "" });
-  };
-
-  return (
-    <div className="bg-white border border-slate-200 rounded-xl p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="font-semibold text-slate-800 flex items-center gap-2">
-          <ShoppingCart size={18} className="text-amber-500" />
-          {initial ? `Modifier ${doc.numero}` : "Nouvelle commande d'achat"}
-        </h3>
-        <Btn variant="ghost" onClick={onCancel}><ChevronLeft size={15} /> Retour à la liste</Btn>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-        <Field label="Numéro"><TextInput value={doc.numero} disabled /></Field>
-        <Field label="Date"><TextInput type="date" value={doc.date} onChange={(e) => setDoc({ ...doc, date: e.target.value })} /></Field>
-        <Field label="Statut">
-          <Select value={doc.statut} onChange={(e) => setDoc({ ...doc, statut: e.target.value })}>
-            {COMMANDE_STATUTS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </Select>
-        </Field>
-        <Field label="Délai de livraison souhaité"><TextInput value={doc.delaiLivraison} onChange={(e) => setDoc({ ...doc, delaiLivraison: e.target.value })} placeholder="ex. 15 jours" /></Field>
-        <Field label="Fournisseur" className="md:col-span-2">
-          <Select value={doc.fournisseurId} onChange={(e) => setDoc({ ...doc, fournisseurId: e.target.value })}>
-            <option value="">— Sélectionner —</option>
-            {fournisseurs.map((f) => <option key={f.id} value={f.id}>{f.raisonSociale}</option>)}
-          </Select>
-        </Field>
-        <Field label="Objet" className="md:col-span-2">
-          <TextInput value={doc.objet} onChange={(e) => setDoc({ ...doc, objet: e.target.value })} />
-        </Field>
-        <Field label="Réf. commande fournisseur" className="md:col-span-2">
-          <TextInput value={doc.refCommandeFournisseur} onChange={(e) => setDoc({ ...doc, refCommandeFournisseur: e.target.value })} />
-        </Field>
-      </div>
-
-      <div className="border border-slate-200 rounded-xl p-4 mb-4">
-        <label className="flex items-center gap-2 text-sm font-medium text-slate-700 cursor-pointer">
-          <input type="checkbox" checked={linkChantier} onChange={(e) => toggleChantier(e.target.checked)} className="rounded border-slate-300" />
-          Lier cette commande à un chantier (optionnel)
-        </label>
-        {linkChantier && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3">
-            <Field label="Chantier / site (base clients)">
-              <Select value={doc.chantierId} onChange={(e) => setDoc({ ...doc, chantierId: e.target.value })}>
-                <option value="">— Aucun —</option>
-                {clients.map((c) => <option key={c.id} value={c.id}>{c.societe} ({c.code})</option>)}
-              </Select>
-            </Field>
-            <Field label="Repère / référence chantier">
-              <TextInput value={doc.chantierRepere} onChange={(e) => setDoc({ ...doc, chantierRepere: e.target.value })} placeholder="ex. numéro d'affaire, repère interne…" />
-            </Field>
-          </div>
-        )}
-      </div>
-
-      <LinesEditor lignes={doc.lignes} setLignes={(l) => setDoc({ ...doc, lignes: l })} catalog={[]} />
-
-      <div className="flex flex-col md:flex-row gap-4 mt-4">
-        <Field label="Conditions / instructions de livraison" className="flex-1">
-          <TextArea rows={4} value={doc.conditions} onChange={(e) => setDoc({ ...doc, conditions: e.target.value })} />
-        </Field>
-        <div className="w-full md:w-64 bg-slate-50 rounded-lg p-4 text-sm space-y-1.5 h-fit">
-          <div className="flex justify-between text-slate-500"><span>Sous-total HT</span><span>{money(totals.sousTotal)}</span></div>
-          <Field label="">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-slate-500">Remise globale</span>
-              <TextInput type="number" value={doc.remiseGlobale} onChange={(e) => setDoc({ ...doc, remiseGlobale: e.target.value })} className="w-24 py-1 text-right" />
-            </div>
-          </Field>
-          <div className="flex justify-between text-slate-700 font-medium"><span>Total HT</span><span>{money(totals.totalHT)}</span></div>
-          <div className="flex justify-between text-slate-500"><span>TVA ({(Number(settings.tauxTVA) * 100).toFixed(0)}%)</span><span>{money(totals.tva)}</span></div>
-          <div className="flex justify-between text-slate-900 font-bold border-t border-slate-300 pt-1.5 mt-1.5"><span>TOTAL TTC</span><span>{money(totals.ttc)}</span></div>
-        </div>
-      </div>
-
-      <div className="flex justify-end gap-2 mt-5">
-        <Btn variant="outline" onClick={onCancel}>Annuler</Btn>
-        <Btn variant="primary" onClick={() => onSave(doc)}><Check size={15} /> Enregistrer la commande</Btn>
-      </div>
-    </div>
-  );
-}
-
-function CommandesTab({ commandesList, saveCommandesList, fournisseurs, clients, settings, openPreview }) {
-  const [editing, setEditing] = useState(null);
-  const [query, setQuery] = useState("");
-
-  const fournisseurName = (id) => fournisseurs.find((f) => f.id === id)?.raisonSociale || "—";
-  const chantierLabel = (d) => {
-    const site = clients.find((c) => c.id === d.chantierId);
-    if (site && d.chantierRepere) return `${site.societe} (${d.chantierRepere})`;
-    if (site) return site.societe;
-    if (d.chantierRepere) return d.chantierRepere;
-    return "—";
-  };
-
-  const filtered = commandesList.filter((d) =>
-    `${d.numero} ${fournisseurName(d.fournisseurId)} ${d.objet} ${chantierLabel(d)}`.toLowerCase().includes(query.toLowerCase())
-  );
-
-  const handleSave = (doc) => {
-    const exists = commandesList.some((d) => d.id === doc.id);
-    const updated = exists ? commandesList.map((d) => (d.id === doc.id ? doc : d)) : [doc, ...commandesList];
-    saveCommandesList(updated);
-    setEditing(null);
-  };
-
-  const remove = (id) => {
-    if (!confirm("Supprimer cette commande ?")) return;
-    saveCommandesList(commandesList.filter((d) => d.id !== id));
-  };
-
-  const duplicate = (d) => {
-    const copy = { ...d, id: uid(), numero: nextNumber(commandesList, settings.numPrefixCommande || "CDA", "numero", settings.numAgencePrefix, settings.numDebutAnneeFiscale), date: today(), statut: "Brouillon" };
-    saveCommandesList([copy, ...commandesList]);
-  };
-
-  if (editing) {
-    return (
-      <CommandeForm
-        initial={editing === "new" ? null : editing}
-        fournisseurs={fournisseurs}
-        clients={clients}
-        commandesList={commandesList}
-        settings={settings}
-        onSave={handleSave}
-        onCancel={() => setEditing(null)}
-      />
-    );
-  }
-
-  return (
-    <div>
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-        <div className="relative w-full sm:w-72">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher une commande…" className="pl-9 w-full" />
-        </div>
-        <Btn variant="primary" onClick={() => setEditing("new")}><Plus size={15} /> Nouvelle commande</Btn>
-      </div>
-
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
-            <tr>
-              <th className="text-left px-4 py-2.5">Numéro</th>
-              <th className="text-left px-4 py-2.5">Fournisseur</th>
-              <th className="text-left px-4 py-2.5">Chantier</th>
-              <th className="text-left px-4 py-2.5">Date</th>
-              <th className="text-left px-4 py-2.5">Statut</th>
-              <th className="text-right px-4 py-2.5">Total TTC</th>
-              <th className="text-right px-4 py-2.5">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((d) => {
-              const t = computeTotals(d.lignes, d.remiseGlobale, settings.tauxTVA);
-              return (
-                <tr key={d.id} className="border-t border-slate-100 hover:bg-slate-50">
-                  <td className="px-4 py-2.5 font-medium text-slate-800">{d.numero}</td>
-                  <td className="px-4 py-2.5 text-slate-600">{fournisseurName(d.fournisseurId)}</td>
-                  <td className="px-4 py-2.5 text-slate-600">{chantierLabel(d)}</td>
-                  <td className="px-4 py-2.5 text-slate-500">{fmtDate(d.date)}</td>
-                  <td className="px-4 py-2.5"><StatusBadge statut={d.statut} /></td>
-                  <td className="px-4 py-2.5 text-right font-medium text-slate-800">{money(t.ttc)}</td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex justify-end gap-1">
-                      <button title="Aperçu / Imprimer" onClick={() => openPreview("commande", d)} className="p-1.5 text-slate-400 hover:text-amber-600"><Printer size={15} /></button>
-                      <button title="Modifier" onClick={() => setEditing(d)} className="p-1.5 text-slate-400 hover:text-slate-700"><Pencil size={15} /></button>
-                      <button title="Dupliquer" onClick={() => duplicate(d)} className="p-1.5 text-slate-400 hover:text-slate-700"><Copy size={15} /></button>
-                      <button title="Supprimer" onClick={() => remove(d.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 size={15} /></button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-            {filtered.length === 0 && (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400">Aucune commande pour le moment.</td></tr>
-            )}
-          </tbody>
-        </table>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* Import d'une base clients depuis un fichier (xlsx/xls/csv)             */
-/* ---------------------------------------------------------------------- */
-
-function normalizeHeader(h) {
-  return String(h || "").trim().toLowerCase();
-}
-
-function findHeaderIndex(headers, aliases) {
-  const norm = headers.map(normalizeHeader);
-  for (const alias of aliases) {
-    const idx = norm.findIndex((h) => h === alias);
-    if (idx !== -1) return idx;
-  }
-  for (const alias of aliases) {
-    const idx = norm.findIndex((h) => h.includes(alias));
-    if (idx !== -1) return idx;
-  }
-  return -1;
-}
-
-function parseCityFromAddress(adresse) {
-  if (!adresse) return "";
-  const parts = adresse.split(",").map((p) => p.trim()).filter(Boolean);
-  if (parts.length < 2) return "";
-  return parts[parts.length - 2] || parts[parts.length - 1] || "";
-}
-
-// Construit une liste de clients { societe, contact, adresse, cp, ville, email, telephone }
-// à partir des en-têtes et des lignes d'un fichier importé. Gère deux cas :
-// - un export type "Sites-Clients-Contacts" (colonne Type avec Site/Contact/Client,
-//   regroupé par organisation) ;
-// - un fichier "plat" classique, une ligne = un client.
-function parseClientsFromRows(headers, rows) {
-  const idx = {
-    type: findHeaderIndex(headers, ["type"]),
-    site: findHeaderIndex(headers, ["nom du site", "site"]),
-    org: findHeaderIndex(headers, ["client / organisation", "client/organisation", "organisation", "société", "societe", "company", "entreprise", "client"]),
-    prenom: findHeaderIndex(headers, ["prénom", "prenom", "first name"]),
-    nom: findHeaderIndex(headers, ["nom du contact", "nom", "last name"]),
-    adresse: findHeaderIndex(headers, ["adresse", "address"]),
-    email: findHeaderIndex(headers, ["e-mail", "email", "mail"]),
-    telFixe: findHeaderIndex(headers, ["téléphone fixe", "telephone fixe", "téléphone", "telephone", "tel"]),
-    telPortable: findHeaderIndex(headers, ["téléphone portable", "telephone portable", "mobile", "portable"]),
-    cp: findHeaderIndex(headers, ["code postal", "cp", "postal code", "zip"]),
-    ville: findHeaderIndex(headers, ["ville", "city"]),
-    contact: findHeaderIndex(headers, ["contact", "interlocuteur"]),
-  };
-
-  const get = (row, i) => (i === -1 || i === undefined ? "" : String(row[i] ?? "").trim());
-
-  if (idx.org !== -1 && idx.type !== -1) {
-    const groups = new Map();
-    rows.forEach((row) => {
-      const org = get(row, idx.org) || get(row, idx.site);
-      if (!org) return;
-      const key = org.toUpperCase();
-      if (!groups.has(key)) {
-        groups.set(key, { societe: org, adresse: "", cp: "", ville: "", email: "", telephone: "", contact: "" });
-      }
-      const g = groups.get(key);
-      const type = get(row, idx.type).toLowerCase();
-      const adresse = get(row, idx.adresse);
-      const cp = get(row, idx.cp);
-      const ville = get(row, idx.ville) || parseCityFromAddress(adresse);
-      const email = get(row, idx.email);
-      const tel = get(row, idx.telFixe) || get(row, idx.telPortable);
-      if (adresse && !g.adresse) g.adresse = adresse;
-      if (cp && !g.cp) g.cp = cp;
-      if (ville && !g.ville) g.ville = ville;
-      if (type === "client") {
-        if (email && !g.email) g.email = email;
-        if (tel && !g.telephone) g.telephone = tel;
-      }
-      if (type === "contact" && !g.contact) {
-        const full = `${get(row, idx.prenom)} ${get(row, idx.nom)}`.trim();
-        if (full) g.contact = full;
-        if (!g.email && email) g.email = email;
-        if (!g.telephone && tel) g.telephone = tel;
-      }
-    });
-    return Array.from(groups.values());
-  }
-
-  const societeIdx = idx.org !== -1 ? idx.org : findHeaderIndex(headers, ["nom"]);
-  const telIdx = idx.telFixe !== -1 ? idx.telFixe : idx.telPortable;
-  return rows
-    .map((row) => ({
-      societe: get(row, societeIdx),
-      contact: get(row, idx.contact),
-      adresse: get(row, idx.adresse),
-      cp: get(row, idx.cp),
-      ville: get(row, idx.ville) || parseCityFromAddress(get(row, idx.adresse)),
-      email: get(row, idx.email),
-      telephone: get(row, telIdx),
-    }))
-    .filter((c) => c.societe);
-}
-
-/* ---------------------------------------------------------------------- */
-/* Clients tab                                                            */
-/* ---------------------------------------------------------------------- */
-
-function ClientsTab({ clients, saveClients, devisList, facturesList, commandesList, settings, openPreview }) {
-  const [editing, setEditing] = useState(null);
-  const [viewing, setViewing] = useState(null);
-  const [query, setQuery] = useState("");
-  const [importing, setImporting] = useState(false);
-  const fileInputRef = useRef(null);
-
-  const blank = () => ({
-    id: uid(),
-    code: `CLI-${String(clients.length + 1).padStart(3, "0")}`,
-    societe: "", contact: "", adresse: "", cp: "", ville: "", email: "", telephone: "",
-  });
-
-  const save = (c) => {
-    const exists = clients.some((x) => x.id === c.id);
-    saveClients(exists ? clients.map((x) => (x.id === c.id ? c : x)) : [...clients, c]);
-    setEditing(null);
-  };
-
-  const remove = (id) => {
-    if (!confirm("Supprimer ce client ?")) return;
-    saveClients(clients.filter((c) => c.id !== id));
-  };
-
-  const importReferentiel = () => {
-    const existingKeys = new Set(clients.map((c) => `${c.societe}|${c.cp}`.toUpperCase()));
-    const toAdd = SEED_CLIENTS_IMPORT.filter((c) => !existingKeys.has(`${c.societe}|${c.cp}`.toUpperCase()));
-    if (toAdd.length === 0) {
-      alert("Tous les sites du référentiel sont déjà présents dans la base clients.");
-      return;
-    }
-    if (!confirm(`Importer ${toAdd.length} site(s) client(s) depuis le référentiel HT Maintenance ?`)) return;
-    saveClients([...clients, ...toAdd.map((c) => ({ ...c, id: uid() }))]);
-  };
-
-  const openFilePicker = () => fileInputRef.current?.click();
-
-  const handleFileImport = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setImporting(true);
+  // Sauvegarde automatique dans le navigateur : relit ce qui a été enregistré
+  // au dernier passage (une seule fois, au tout premier rendu).
+  const [saved] = useState(() => {
     try {
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: "array" });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-      if (!rows.length) {
-        alert(`"${file.name}" semble vide.`);
-        return;
-      }
-      const headers = rows[0].map((h) => String(h ?? ""));
-      const dataRows = rows.slice(1);
-      const parsed = parseClientsFromRows(headers, dataRows);
-
-      if (parsed.length === 0) {
-        alert(`Aucune colonne reconnue dans "${file.name}". Attendu au minimum une colonne société/client/organisation.`);
-        return;
-      }
-
-      const seenInBatch = new Set();
-      const uniqueParsed = parsed.filter((c) => {
-        const k = `${c.societe}|${c.cp}`.toUpperCase();
-        if (seenInBatch.has(k)) return false;
-        seenInBatch.add(k);
-        return true;
-      });
-
-      const existingKeys = new Set(clients.map((c) => `${c.societe}|${c.cp}`.toUpperCase()));
-      const toAdd = uniqueParsed.filter((c) => !existingKeys.has(`${c.societe}|${c.cp}`.toUpperCase()));
-
-      if (toAdd.length === 0) {
-        alert(`"${file.name}" lu (${uniqueParsed.length} client(s) identifié(s)) — tous sont déjà présents dans la base.`);
-        return;
-      }
-
-      if (!confirm(`"${file.name}" : ${toAdd.length} nouveau(x) client(s) trouvé(s) sur ${uniqueParsed.length} identifié(s). Les importer ?`)) return;
-
-      const withIds = toAdd.map((c, i) => ({
-        id: uid(),
-        code: `CLI-${String(clients.length + i + 1).padStart(4, "0")}`,
-        societe: c.societe, contact: c.contact || "", adresse: c.adresse || "",
-        cp: c.cp || "", ville: c.ville || "", email: c.email || "", telephone: c.telephone || "",
-      }));
-      saveClients([...clients, ...withIds]);
-    } catch (err) {
-      alert(`Impossible de lire "${file.name}". Formats acceptés : .xlsx, .xls, .csv`);
-    } finally {
-      setImporting(false);
-      e.target.value = "";
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
     }
-  };
-
-  const filtered = clients.filter((c) =>
-    `${c.societe} ${c.ville} ${c.contact}`.toLowerCase().includes(query.toLowerCase())
-  );
-
-  if (viewing) {
-    return (
-      <ClientDossier
-        client={viewing}
-        devisList={devisList}
-        facturesList={facturesList}
-        commandesList={commandesList}
-        settings={settings}
-        openPreview={openPreview}
-        onBack={() => setViewing(null)}
-      />
-    );
-  }
-
-  return (
-    <div>
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-        <h3 className="font-semibold text-slate-800">Base clients / sites ({clients.length})</h3>
-        <div className="flex gap-2">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
-            onChange={handleFileImport}
-            className="hidden"
-          />
-          <Btn variant="outline" onClick={openFilePicker} disabled={importing}>
-            <Upload size={15} /> {importing ? "Lecture…" : "Importer un fichier"}
-          </Btn>
-          <Btn variant="outline" onClick={importReferentiel}><Upload size={15} /> Importer le référentiel</Btn>
-          <Btn variant="primary" onClick={() => setEditing(blank())}><Plus size={15} /> Nouveau client</Btn>
-        </div>
-      </div>
-
-      <div className="relative w-full sm:w-72 mb-1">
-        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-        <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un client ou un site…" className="pl-9 w-full" />
-      </div>
-      <p className="text-xs text-slate-400 mb-4">
-        Import de fichier : .xlsx, .xls ou .csv — colonnes reconnues automatiquement (société/organisation, adresse, code postal, ville, e-mail, téléphone, contact). Les exports "Type: Site/Contact/Client" sont regroupés par organisation.
-      </p>
-
-      {editing && (
-        <div className="bg-white border border-slate-200 rounded-xl p-5 mb-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <Field label="Code"><TextInput value={editing.code} onChange={(e) => setEditing({ ...editing, code: e.target.value })} /></Field>
-            <Field label="Société" className="md:col-span-2"><TextInput value={editing.societe} onChange={(e) => setEditing({ ...editing, societe: e.target.value })} /></Field>
-            <Field label="Contact"><TextInput value={editing.contact} onChange={(e) => setEditing({ ...editing, contact: e.target.value })} /></Field>
-            <Field label="Adresse" className="md:col-span-2"><TextInput value={editing.adresse} onChange={(e) => setEditing({ ...editing, adresse: e.target.value })} /></Field>
-            <Field label="Code postal"><TextInput value={editing.cp} onChange={(e) => setEditing({ ...editing, cp: e.target.value })} /></Field>
-            <Field label="Ville"><TextInput value={editing.ville} onChange={(e) => setEditing({ ...editing, ville: e.target.value })} /></Field>
-            <Field label="E-mail"><TextInput value={editing.email} onChange={(e) => setEditing({ ...editing, email: e.target.value })} /></Field>
-            <Field label="Téléphone"><TextInput value={editing.telephone} onChange={(e) => setEditing({ ...editing, telephone: e.target.value })} /></Field>
-          </div>
-          <div className="flex justify-end gap-2 mt-4">
-            <Btn variant="outline" onClick={() => setEditing(null)}>Annuler</Btn>
-            <Btn variant="primary" onClick={() => save(editing)}><Check size={15} /> Enregistrer</Btn>
-          </div>
-        </div>
-      )}
-
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
-            <tr>
-              <th className="text-left px-4 py-2.5">Code</th>
-              <th className="text-left px-4 py-2.5">Société</th>
-              <th className="text-left px-4 py-2.5">Contact</th>
-              <th className="text-left px-4 py-2.5">Ville</th>
-              <th className="text-left px-4 py-2.5">E-mail</th>
-              <th className="text-right px-4 py-2.5">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.slice(0, 300).map((c) => (
-              <tr key={c.id} className="border-t border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-2.5 text-slate-500">{c.code}</td>
-                <td className="px-4 py-2.5">
-                  <button onClick={() => setViewing(c)} className="font-medium text-slate-800 hover:text-amber-600 hover:underline text-left">
-                    {c.societe}
-                  </button>
-                </td>
-                <td className="px-4 py-2.5 text-slate-600">{c.contact}</td>
-                <td className="px-4 py-2.5 text-slate-600">{c.ville}</td>
-                <td className="px-4 py-2.5 text-slate-600">{c.email}</td>
-                <td className="px-4 py-2.5">
-                  <div className="flex justify-end gap-1">
-                    <button title="Dossier client" onClick={() => setViewing(c)} className="p-1.5 text-slate-400 hover:text-amber-600"><FolderOpen size={15} /></button>
-                    <button title="Modifier" onClick={() => setEditing(c)} className="p-1.5 text-slate-400 hover:text-slate-700"><Pencil size={15} /></button>
-                    <button title="Supprimer" onClick={() => remove(c.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 size={15} /></button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {filtered.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400">Aucun client. Ajoutez-en un ou importez le référentiel.</td></tr>
-            )}
-          </tbody>
-        </table>
-        </div>
-        {filtered.length > 300 && (
-          <div className="px-4 py-2 text-xs text-slate-400 border-t border-slate-100">
-            {filtered.length - 300} résultat(s) supplémentaire(s) — affinez la recherche pour les voir.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ClientDossier({ client, devisList, facturesList, commandesList, settings, openPreview, onBack }) {
-  const devis = devisList.filter((d) => d.clientId === client.id);
-  const factures = facturesList.filter((f) => f.clientId === client.id);
-  const commandes = commandesList.filter((c) => c.chantierId === client.id);
-
-  const totalDevisTTC = devis.reduce((s, d) => s + computeTotals(d.lignes, d.remiseGlobale, settings.tauxTVA).ttc, 0);
-  const totalFactureTTC = factures.reduce((s, f) => s + computeTotals(f.lignes, f.remiseGlobale, settings.tauxTVA).ttc, 0);
-  const totalEncaisse = factures.filter((f) => f.statut === "Payée").reduce((s, f) => s + computeTotals(f.lignes, f.remiseGlobale, settings.tauxTVA).ttc, 0);
-
-  return (
-    <div>
-      <Btn variant="ghost" onClick={onBack} className="mb-4"><ChevronLeft size={15} /> Retour aux clients</Btn>
-
-      <div className="bg-white border border-slate-200 rounded-xl p-5 mb-4">
-        <h3 className="font-bold text-lg text-slate-900">{client.societe}</h3>
-        <div className="text-sm text-slate-500 mt-1 space-y-0.5">
-          {client.contact && <div>{client.contact}</div>}
-          {client.adresse && <div>{client.adresse}</div>}
-          {(client.cp || client.ville) && <div>{client.cp} {client.ville}</div>}
-          {client.email && <div>{client.email}</div>}
-          {client.telephone && <div>{client.telephone}</div>}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-3 gap-4 mb-6">
-        <KpiCard icon={<FileText size={14} />} label="Devis" value={devis.length} sub={money(totalDevisTTC) + " TTC"} />
-        <KpiCard icon={<Receipt size={14} />} label="Factures" value={factures.length} sub={money(totalFactureTTC) + " TTC"} />
-        <KpiCard icon={<CircleDollarSign size={14} />} label="Encaissé" value={money(totalEncaisse)} sub="factures payées" accent="text-emerald-600" />
-      </div>
-
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-4">
-        <div className="px-4 py-3 border-b border-slate-100"><h4 className="font-semibold text-slate-800 text-sm">Devis</h4></div>
-        {devis.length === 0 ? (
-          <div className="px-4 py-6 text-center text-slate-400 text-sm">Aucun devis pour ce client.</div>
-        ) : (
-          <ul>
-            {devis.map((d) => (
-              <li key={d.id} className="flex items-center justify-between px-4 py-2.5 border-t border-slate-100 first:border-t-0 text-sm">
-                <div>
-                  <div className="font-medium text-slate-800">{d.numero}</div>
-                  <div className="text-xs text-slate-400">{fmtDate(d.date)} — {money(computeTotals(d.lignes, d.remiseGlobale, settings.tauxTVA).ttc)}</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <StatusBadge statut={d.statut} />
-                  <button onClick={() => openPreview("devis", d)} className="text-slate-400 hover:text-amber-600"><Printer size={14} /></button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-4">
-        <div className="px-4 py-3 border-b border-slate-100"><h4 className="font-semibold text-slate-800 text-sm">Factures</h4></div>
-        {factures.length === 0 ? (
-          <div className="px-4 py-6 text-center text-slate-400 text-sm">Aucune facture pour ce client.</div>
-        ) : (
-          <ul>
-            {factures.map((f) => (
-              <li key={f.id} className="flex items-center justify-between px-4 py-2.5 border-t border-slate-100 first:border-t-0 text-sm">
-                <div>
-                  <div className="font-medium text-slate-800">{f.numero}{f.type && f.type !== "Complète" ? ` (${f.type})` : ""}</div>
-                  <div className="text-xs text-slate-400">{fmtDate(f.dateEmission)} — {money(computeTotals(f.lignes, f.remiseGlobale, settings.tauxTVA).ttc)}</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <StatusBadge statut={f.statut} />
-                  <button onClick={() => openPreview("facture", f)} className="text-slate-400 hover:text-amber-600"><Printer size={14} /></button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-100"><h4 className="font-semibold text-slate-800 text-sm">Commandes d'achat liées à ce chantier</h4></div>
-        {commandes.length === 0 ? (
-          <div className="px-4 py-6 text-center text-slate-400 text-sm">Aucune commande d'achat liée à ce chantier.</div>
-        ) : (
-          <ul>
-            {commandes.map((c) => (
-              <li key={c.id} className="flex items-center justify-between px-4 py-2.5 border-t border-slate-100 first:border-t-0 text-sm">
-                <div>
-                  <div className="font-medium text-slate-800">{c.numero}</div>
-                  <div className="text-xs text-slate-400">{fmtDate(c.date)} — {money(computeTotals(c.lignes, c.remiseGlobale, settings.tauxTVA).ttc)}</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <StatusBadge statut={c.statut} />
-                  <button onClick={() => openPreview("commande", c)} className="text-slate-400 hover:text-amber-600"><Printer size={14} /></button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* Prestations (catalog) tab                                              */
-/* ---------------------------------------------------------------------- */
-
-function CatalogTab({ catalog, saveCatalog }) {
-  const [editing, setEditing] = useState(null);
-
-  const blank = () => ({
-    id: uid(),
-    ref: `PREST-${String(catalog.length + 1).padStart(3, "0")}`,
-    designation: "", unite: "", prixHT: 0, actif: true,
   });
 
-  const save = (p) => {
-    const exists = catalog.some((x) => x.id === p.id);
-    saveCatalog(exists ? catalog.map((x) => (x.id === p.id ? p : x)) : [...catalog, p]);
-    setEditing(null);
-  };
-
-  const remove = (id) => {
-    if (!confirm("Supprimer cette prestation ?")) return;
-    saveCatalog(catalog.filter((c) => c.id !== id));
-  };
-
-  const toggleActif = (p) => saveCatalog(catalog.map((c) => (c.id === p.id ? { ...c, actif: !c.actif } : c)));
-
-  return (
-    <div>
-      <div className="flex justify-between items-center mb-4">
-        <h3 className="font-semibold text-slate-800">Catalogue des prestations</h3>
-        <Btn variant="primary" onClick={() => setEditing(blank())}><Plus size={15} /> Nouvelle prestation</Btn>
-      </div>
-
-      {editing && (
-        <div className="bg-white border border-slate-200 rounded-xl p-5 mb-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <Field label="Référence"><TextInput value={editing.ref} onChange={(e) => setEditing({ ...editing, ref: e.target.value })} /></Field>
-            <Field label="Désignation" className="sm:col-span-2"><TextInput value={editing.designation} onChange={(e) => setEditing({ ...editing, designation: e.target.value })} /></Field>
-            <Field label="Unité"><TextInput value={editing.unite} onChange={(e) => setEditing({ ...editing, unite: e.target.value })} /></Field>
-            <Field label="Prix unitaire HT"><TextInput type="number" value={editing.prixHT} onChange={(e) => setEditing({ ...editing, prixHT: e.target.value })} /></Field>
-          </div>
-          <div className="flex justify-end gap-2 mt-4">
-            <Btn variant="outline" onClick={() => setEditing(null)}>Annuler</Btn>
-            <Btn variant="primary" onClick={() => save(editing)}><Check size={15} /> Enregistrer</Btn>
-          </div>
-        </div>
-      )}
-
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
-            <tr>
-              <th className="text-left px-4 py-2.5">Référence</th>
-              <th className="text-left px-4 py-2.5">Désignation</th>
-              <th className="text-left px-4 py-2.5">Unité</th>
-              <th className="text-right px-4 py-2.5">Prix HT</th>
-              <th className="text-center px-4 py-2.5">Actif</th>
-              <th className="text-right px-4 py-2.5">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sortByRef(catalog).map((c) => (
-              <tr key={c.id} className="border-t border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-2.5 text-slate-500">{c.ref}</td>
-                <td className="px-4 py-2.5 font-medium text-slate-800">{c.designation}</td>
-                <td className="px-4 py-2.5 text-slate-600">{c.unite}</td>
-                <td className="px-4 py-2.5 text-right text-slate-700">{money(Number(c.prixHT))}</td>
-                <td className="px-4 py-2.5 text-center">
-                  <button onClick={() => toggleActif(c)}>
-                    {c.actif ? <Check size={16} className="text-emerald-600 mx-auto" /> : <X size={16} className="text-slate-300 mx-auto" />}
-                  </button>
-                </td>
-                <td className="px-4 py-2.5">
-                  <div className="flex justify-end gap-1">
-                    <button onClick={() => setEditing(c)} className="p-1.5 text-slate-400 hover:text-slate-700"><Pencil size={15} /></button>
-                    <button onClick={() => remove(c.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 size={15} /></button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* Fournisseurs tab                                                        */
-/* ---------------------------------------------------------------------- */
-
-function FournisseursTab({ fournisseurs, saveFournisseurs }) {
-  const [editing, setEditing] = useState(null);
-  const [query, setQuery] = useState("");
-
-  const blank = () => ({
-    id: uid(), raisonSociale: "", specialite: "", marques: "", contact: "",
-    telephone: "", email: "", adresse: "", cp: "", ville: "",
-  });
-
-  const save = (f) => {
-    const exists = fournisseurs.some((x) => x.id === f.id);
-    saveFournisseurs(exists ? fournisseurs.map((x) => (x.id === f.id ? f : x)) : [...fournisseurs, f]);
-    setEditing(null);
-  };
-
-  const remove = (id) => {
-    if (!confirm("Supprimer ce fournisseur ?")) return;
-    saveFournisseurs(fournisseurs.filter((f) => f.id !== id));
-  };
-
-  const importReferentiel = () => {
-    const existing = new Set(fournisseurs.map((f) => f.raisonSociale.toUpperCase()));
-    const toAdd = SEED_FOURNISSEURS.filter((f) => !existing.has(f.raisonSociale.toUpperCase()));
-    if (toAdd.length === 0) {
-      alert("Tous les fournisseurs du référentiel sont déjà présents.");
-      return;
-    }
-    if (!confirm(`Importer ${toAdd.length} fournisseur(s) depuis le référentiel HT Maintenance ?`)) return;
-    saveFournisseurs([...fournisseurs, ...toAdd.map((f) => ({ ...f, id: uid() }))]);
-  };
-
-  const filtered = fournisseurs.filter((f) =>
-    `${f.raisonSociale} ${f.specialite} ${f.marques}`.toLowerCase().includes(query.toLowerCase())
-  );
-
-  return (
-    <div>
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-        <h3 className="font-semibold text-slate-800">Fournisseurs ({fournisseurs.length})</h3>
-        <div className="flex gap-2">
-          <Btn variant="outline" onClick={importReferentiel}><Upload size={15} /> Importer le référentiel</Btn>
-          <Btn variant="primary" onClick={() => setEditing(blank())}><Plus size={15} /> Nouveau fournisseur</Btn>
-        </div>
-      </div>
-
-      <div className="relative w-full sm:w-72 mb-4">
-        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-        <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un fournisseur, une marque…" className="pl-9 w-full" />
-      </div>
-
-      {editing && (
-        <div className="bg-white border border-slate-200 rounded-xl p-5 mb-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <Field label="Raison sociale" className="md:col-span-2"><TextInput value={editing.raisonSociale} onChange={(e) => setEditing({ ...editing, raisonSociale: e.target.value })} /></Field>
-            <Field label="Spécialité / pièces" className="md:col-span-2"><TextInput value={editing.specialite} onChange={(e) => setEditing({ ...editing, specialite: e.target.value })} /></Field>
-            <Field label="Marques"><TextInput value={editing.marques} onChange={(e) => setEditing({ ...editing, marques: e.target.value })} /></Field>
-            <Field label="Contact"><TextInput value={editing.contact} onChange={(e) => setEditing({ ...editing, contact: e.target.value })} /></Field>
-            <Field label="Téléphone"><TextInput value={editing.telephone} onChange={(e) => setEditing({ ...editing, telephone: e.target.value })} /></Field>
-            <Field label="E-mail"><TextInput value={editing.email} onChange={(e) => setEditing({ ...editing, email: e.target.value })} /></Field>
-            <Field label="Adresse" className="md:col-span-2"><TextInput value={editing.adresse} onChange={(e) => setEditing({ ...editing, adresse: e.target.value })} /></Field>
-            <Field label="Code postal"><TextInput value={editing.cp} onChange={(e) => setEditing({ ...editing, cp: e.target.value })} /></Field>
-            <Field label="Ville"><TextInput value={editing.ville} onChange={(e) => setEditing({ ...editing, ville: e.target.value })} /></Field>
-          </div>
-          <div className="flex justify-end gap-2 mt-4">
-            <Btn variant="outline" onClick={() => setEditing(null)}>Annuler</Btn>
-            <Btn variant="primary" onClick={() => save(editing)}><Check size={15} /> Enregistrer</Btn>
-          </div>
-        </div>
-      )}
-
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
-            <tr>
-              <th className="text-left px-4 py-2.5">Raison sociale</th>
-              <th className="text-left px-4 py-2.5">Spécialité</th>
-              <th className="text-left px-4 py-2.5">Contact</th>
-              <th className="text-left px-4 py-2.5">Téléphone</th>
-              <th className="text-left px-4 py-2.5">E-mail</th>
-              <th className="text-right px-4 py-2.5">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((f) => (
-              <tr key={f.id} className="border-t border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-2.5 font-medium text-slate-800">{f.raisonSociale}</td>
-                <td className="px-4 py-2.5 text-slate-600">{f.specialite}</td>
-                <td className="px-4 py-2.5 text-slate-600">{f.contact}</td>
-                <td className="px-4 py-2.5 text-slate-600">{f.telephone}</td>
-                <td className="px-4 py-2.5 text-slate-600">{f.email}</td>
-                <td className="px-4 py-2.5">
-                  <div className="flex justify-end gap-1">
-                    <button onClick={() => setEditing(f)} className="p-1.5 text-slate-400 hover:text-slate-700"><Pencil size={15} /></button>
-                    <button onClick={() => remove(f.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 size={15} /></button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {filtered.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400">Aucun fournisseur. Ajoutez-en un ou importez le référentiel.</td></tr>
-            )}
-          </tbody>
-        </table>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* CGV                                                                    */
-/* ---------------------------------------------------------------------- */
-
-function CGVTab({ cgv, saveCgv, settings }) {
-  const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState(cgv);
-  const [showPrint, setShowPrint] = useState(false);
-
-  const startEdit = () => {
-    setForm(cgv);
-    setEditing(true);
-  };
-
-  const updateArticle = (i, texte) => {
-    const articles = form.articles.map((a, idx) => (idx === i ? { ...a, texte } : a));
-    setForm({ ...form, articles });
-  };
-
-  const save = () => {
-    saveCgv(form);
-    setEditing(false);
-  };
-
-  const resetDefault = () => {
-    if (!confirm("Réinitialiser les CGV au texte proposé par défaut ? Vos modifications seront perdues.")) return;
-    setForm({ intro: CGV_INTRO, articles: CGV_ARTICLES_DEFAULT });
-  };
-
-  return (
-    <div>
-      <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-        <AlertTriangle size={15} className="shrink-0 mt-0.5" />
-        <span>Ce texte est une base de travail générale (B2B) à faire vérifier et adapter par un avocat ou juriste avant diffusion — notamment forme juridique, assurance RC Pro, activités exactes et plafonds de responsabilité.</span>
-      </div>
-
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-        <h3 className="font-semibold text-slate-800">Conditions Générales de Vente — Version {settings.versionCGV}</h3>
-        <div className="flex gap-2">
-          <Btn variant="outline" onClick={() => setShowPrint(true)}><Printer size={15} /> Aperçu / Imprimer</Btn>
-          {!editing && <Btn variant="primary" onClick={startEdit}><Pencil size={15} /> Modifier le texte</Btn>}
-        </div>
-      </div>
-
-      {editing ? (
-        <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <Field label="Introduction" className="mb-4">
-            <TextArea rows={3} value={form.intro} onChange={(e) => setForm({ ...form, intro: e.target.value })} />
-          </Field>
-          <div className="space-y-4">
-            {form.articles.map((a, i) => (
-              <Field key={i} label={a.titre}>
-                <TextArea rows={3} value={a.texte} onChange={(e) => updateArticle(i, e.target.value)} />
-              </Field>
-            ))}
-          </div>
-          <div className="flex justify-between items-center mt-5">
-            <button onClick={resetDefault} className="text-xs text-slate-400 hover:text-red-600 hover:underline">Réinitialiser au texte par défaut</button>
-            <div className="flex gap-2">
-              <Btn variant="outline" onClick={() => setEditing(false)}>Annuler</Btn>
-              <Btn variant="primary" onClick={save}><Check size={15} /> Enregistrer</Btn>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
-          <p className="text-sm text-slate-600 leading-relaxed">{cgv.intro}</p>
-          {cgv.articles.map((a, i) => (
-            <div key={i}>
-              <div className="font-semibold text-slate-800 text-sm mb-1">{a.titre}</div>
-              <p className="text-sm text-slate-600 leading-relaxed">{a.texte}</p>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {showPrint && <CGVPrintView cgv={cgv} settings={settings} onClose={() => setShowPrint(false)} />}
-    </div>
-  );
-}
-
-function CGVPrintView({ cgv, settings, onClose }) {
-  return (
-    <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-start justify-center overflow-y-auto py-2 sm:py-8 px-0 sm:px-4 no-print-parent">
-      <style>{`
-        @media print {
-          body * { visibility: hidden; }
-          .print-area, .print-area * { visibility: visible; }
-          .print-area { position: absolute; top: 0; left: 0; width: 100%; padding: 0; margin: 0; box-shadow: none !important; }
-          .no-print { display: none !important; }
-        }
-      `}</style>
-      <div className="bg-white w-full sm:max-w-3xl rounded-none sm:rounded-xl shadow-2xl print-area">
-        <div className="no-print flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 border-b border-slate-200 sticky top-0 bg-white z-10">
-          <span className="text-sm font-medium text-slate-500">Aperçu des CGV</span>
-          <div className="flex gap-2">
-            <Btn variant="outline" onClick={() => window.print()}><Printer size={15} /> Imprimer / PDF</Btn>
-            <Btn variant="ghost" onClick={onClose}><X size={15} /> Fermer</Btn>
-          </div>
-        </div>
-        <div className="p-4 sm:p-8">
-          <div className="flex items-center gap-2 text-slate-900 font-bold text-xl mb-1">
-            {settings.logoDataUrl ? (
-              <img src={settings.logoDataUrl} alt={settings.entreprise} className="h-10 object-contain" />
-            ) : (
-              <><Zap size={20} className="text-amber-500" /> {settings.entreprise}</>
-            )}
-          </div>
-          <div className="text-lg font-bold text-slate-900 mt-4">CONDITIONS GÉNÉRALES DE VENTE</div>
-          <div className="text-xs text-slate-500 mb-6">Version {settings.versionCGV} — {settings.entreprise}</div>
-          <p className="text-xs text-slate-600 leading-relaxed mb-4">{cgv.intro}</p>
-          <div className="space-y-3">
-            {cgv.articles.map((a, i) => (
-              <div key={i}>
-                <div className="font-semibold text-slate-800 text-xs mb-0.5">{a.titre}</div>
-                <p className="text-xs text-slate-600 leading-relaxed">{a.texte}</p>
-              </div>
-            ))}
-          </div>
-          <div className="text-[10px] text-slate-400 text-center border-t border-slate-200 pt-2 mt-6">
-            Document proposé comme base de travail — validation juridique recommandée avant diffusion.
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* Settings tab                                                           */
-/* ---------------------------------------------------------------------- */
-
-function SettingsTab({ settings, saveSettings, onExportBackup, onImportBackup, backupCounts }) {
-  const [form, setForm] = useState(settings);
-  const dirty = JSON.stringify(form) !== JSON.stringify(settings);
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
-  const backupInputRef = useRef(null);
-
-  const handleImportFile = (e) => {
-    const file = e.target.files?.[0];
-    if (file) onImportBackup(file);
-    e.target.value = "";
-  };
-
-  return (
-    <div className="max-w-3xl">
-      <h3 className="font-semibold text-slate-800 mb-4">Coordonnées de l'entreprise</h3>
-      <div className="bg-white border border-slate-200 rounded-xl p-5 grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-        <Field label="Entreprise"><TextInput value={form.entreprise} onChange={set("entreprise")} /></Field>
-        <Field label="Nom du dirigeant"><TextInput value={form.dirigeant} onChange={set("dirigeant")} /></Field>
-        <Field label="Adresse" className="col-span-2"><TextInput value={form.adresse} onChange={set("adresse")} /></Field>
-        <Field label="Code postal"><TextInput value={form.cp} onChange={set("cp")} /></Field>
-        <Field label="Ville"><TextInput value={form.ville} onChange={set("ville")} /></Field>
-        <Field label="Téléphone"><TextInput value={form.telephone} onChange={set("telephone")} /></Field>
-        <Field label="E-mail"><TextInput value={form.email} onChange={set("email")} /></Field>
-        <Field label="SIRET"><TextInput value={form.siret} onChange={set("siret")} /></Field>
-        <Field label="N° TVA"><TextInput value={form.tvaNum} onChange={set("tvaNum")} /></Field>
-        <Field label="IBAN"><TextInput value={form.iban} onChange={set("iban")} /></Field>
-        <Field label="BIC"><TextInput value={form.bic} onChange={set("bic")} /></Field>
-        <Field label="Taux de TVA par défaut (ex. 0.2)"><TextInput type="number" step="0.01" value={form.tauxTVA} onChange={set("tauxTVA")} /></Field>
-      </div>
-
-      <h3 className="font-semibold text-slate-800 mb-4">Logo</h3>
-      <div className="bg-white border border-slate-200 rounded-xl p-5 flex items-center gap-4 mb-6">
-        {form.logoDataUrl ? (
-          <img src={form.logoDataUrl} alt="Logo" className="h-14 max-w-[160px] object-contain border border-slate-200 rounded-lg p-1" />
-        ) : (
-          <div className="h-14 w-24 flex items-center justify-center border border-dashed border-slate-300 rounded-lg text-slate-300 text-xs">Aucun logo</div>
-        )}
-        <div className="flex flex-col gap-2">
-          <input
-            type="file"
-            accept="image/png,image/jpeg,image/svg+xml"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (!file) return;
-              if (file.size > 800 * 1024) {
-                alert("Image trop lourde (max ~800 Ko). Choisissez un logo plus léger.");
-                return;
-              }
-              const reader = new FileReader();
-              reader.onload = () => setForm({ ...form, logoDataUrl: reader.result });
-              reader.readAsDataURL(file);
-            }}
-            className="text-xs"
-          />
-          {form.logoDataUrl && (
-            <button type="button" onClick={() => setForm({ ...form, logoDataUrl: "" })} className="text-xs text-red-600 text-left hover:underline">
-              Retirer le logo
-            </button>
-          )}
-          <p className="text-xs text-slate-400">PNG, JPEG ou SVG, utilisé dans l'en-tête des devis, factures et commandes imprimés.</p>
-        </div>
-      </div>
-
-      <h3 className="font-semibold text-slate-800 mb-4">Numérotation & suivi</h3>
-      <div className="bg-white border border-slate-200 rounded-xl p-5 grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-        <Field label="Préfixe agence (optionnel)"><TextInput value={form.numAgencePrefix} onChange={set("numAgencePrefix")} placeholder="ex. LYO" /></Field>
-        <Field label="Début de l'année fiscale">
-          <Select value={form.numDebutAnneeFiscale} onChange={set("numDebutAnneeFiscale")}>
-            {["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"].map((m, i) => (
-              <option key={i} value={i + 1}>{m}</option>
-            ))}
-          </Select>
-        </Field>
-        <Field label="Préfixe des devis"><TextInput value={form.numPrefixDevis} onChange={set("numPrefixDevis")} /></Field>
-        <Field label="Préfixe des factures"><TextInput value={form.numPrefixFacture} onChange={set("numPrefixFacture")} /></Field>
-        <Field label="Préfixe des commandes d'achat"><TextInput value={form.numPrefixCommande} onChange={set("numPrefixCommande")} /></Field>
-        <Field label="Relancer un devis envoyé après (jours)"><TextInput type="number" value={form.relanceJours} onChange={set("relanceJours")} /></Field>
-        <Field label="Frais d'annulation tardive (% si < 24h avant intervention)"><TextInput type="number" value={form.fraisAnnulationPourcentage} onChange={set("fraisAnnulationPourcentage")} /></Field>
-        <Field label="Acompte exigé au-delà de (€ HT)"><TextInput type="number" value={form.seuilAcompteMontant} onChange={set("seuilAcompteMontant")} /></Field>
-        <Field label="Pourcentage de l'acompte exigé"><TextInput type="number" value={form.acomptePourcentage} onChange={set("acomptePourcentage")} /></Field>
-        <div className="sm:col-span-2 text-xs text-slate-400">
-          Aperçu du prochain numéro de devis : {(form.numAgencePrefix ? form.numAgencePrefix + "-" : "") + (form.numPrefixDevis || "DEV")}-{fiscalYear(form.numDebutAnneeFiscale)}-001
-        </div>
-      </div>
-
-      <h3 className="font-semibold text-slate-800 mb-4">Informations juridiques</h3>
-      <div className="bg-white border border-slate-200 rounded-xl p-5 grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-        <Field label="Forme juridique"><TextInput value={form.formeJuridique} onChange={set("formeJuridique")} /></Field>
-        <Field label="Capital social"><TextInput value={form.capitalSocial} onChange={set("capitalSocial")} /></Field>
-        <Field label="RCS / RM"><TextInput value={form.rcs} onChange={set("rcs")} /></Field>
-        <Field label="N° assurance RC Pro"><TextInput value={form.assuranceRCPro} onChange={set("assuranceRCPro")} /></Field>
-        <Field label="Assureur"><TextInput value={form.assureur} onChange={set("assureur")} /></Field>
-        <Field label="Territorialité assurance"><TextInput value={form.territorialite} onChange={set("territorialite")} /></Field>
-        <Field label="Délai de paiement"><TextInput value={form.delaiPaiement} onChange={set("delaiPaiement")} /></Field>
-        <Field label="Taux de pénalités"><TextInput value={form.tauxPenalites} onChange={set("tauxPenalites")} /></Field>
-        <Field label="Escompte paiement anticipé"><TextInput value={form.escompte} onChange={set("escompte")} /></Field>
-        <Field label="Indemnité recouvrement (€)"><TextInput type="number" value={form.indemniteRecouvrement} onChange={set("indemniteRecouvrement")} /></Field>
-        <Field label="Tribunal proposé" className="col-span-2"><TextInput value={form.tribunal} onChange={set("tribunal")} /></Field>
-        <Field label="Durée garantie prestation"><TextInput value={form.dureeGarantie} onChange={set("dureeGarantie")} /></Field>
-        <Field label="Version des CGV"><TextInput value={form.versionCGV} onChange={set("versionCGV")} /></Field>
-        <Field label="Clientèle"><TextInput value={form.clientele} onChange={set("clientele")} /></Field>
-      </div>
-
-      <h3 className="font-semibold text-slate-800 mb-4">Sauvegarde & restauration</h3>
-      <div className="bg-white border border-slate-200 rounded-xl p-5 mb-6">
-        <div className="flex items-start gap-2 text-sm text-slate-600 mb-4">
-          <DatabaseBackup size={16} className="shrink-0 mt-0.5 text-slate-400" />
-          <p>
-            Toutes les données (clients, devis, factures, commandes, fournisseurs, catalogue, CGV, paramètres) sont
-            stockées uniquement dans ce navigateur. Téléchargez une sauvegarde régulièrement pour ne rien perdre, et
-            pour transférer vos données vers un autre appareil ou navigateur.
-            {backupCounts && (
-              <span className="block text-xs text-slate-400 mt-1">
-                Actuellement : {backupCounts.clients} client(s), {backupCounts.devis} devis, {backupCounts.factures} facture(s),
-                {" "}{backupCounts.commandes} commande(s), {backupCounts.fournisseurs} fournisseur(s), {backupCounts.catalog} prestation(s).
-              </span>
-            )}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Btn variant="outline" onClick={onExportBackup}><Download size={15} /> Télécharger une sauvegarde</Btn>
-          <Btn variant="outline" onClick={() => backupInputRef.current?.click()}><Upload size={15} /> Restaurer une sauvegarde</Btn>
-          <input ref={backupInputRef} type="file" accept=".json,application/json" className="hidden" onChange={handleImportFile} />
-        </div>
-      </div>
-
-      <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-        <AlertTriangle size={15} className="shrink-0 mt-0.5" />
-        <span>Les clauses et paramètres juridiques sont une base de travail. Faites-les valider par un avocat ou juriste avant diffusion.</span>
-      </div>
-
-      <div className="flex justify-end">
-        <Btn variant="primary" disabled={!dirty} onClick={() => saveSettings(form)}><Check size={15} /> Enregistrer les paramètres</Btn>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* Dashboard tab                                                          */
-/* ---------------------------------------------------------------------- */
-
-function KpiCard({ icon, label, value, sub, accent = "text-slate-800" }) {
-  return (
-    <div className="bg-white border border-slate-200 rounded-xl p-4">
-      <div className="flex items-center gap-2 text-slate-400 text-xs uppercase tracking-wide font-semibold mb-2">
-        {icon} {label}
-      </div>
-      <div className={`text-2xl font-bold ${accent}`}>{value}</div>
-      {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
-    </div>
-  );
-}
-
-function DashboardTab({ devisList, facturesList, commandesList, clients, settings, setTab, openPreview }) {
-  const clientName = (id) => clients.find((c) => c.id === id)?.societe || "—";
-
-  const stats = useMemo(() => {
-    const tauxTVA = settings.tauxTVA;
-    const devisTotal = devisList.reduce((s, d) => s + computeTotals(d.lignes, d.remiseGlobale, tauxTVA).ttc, 0);
-    const acceptes = devisList.filter((d) => d.statut === "Accepté");
-    const tauxConversion = devisList.length ? Math.round((acceptes.length / devisList.length) * 100) : 0;
-
-    const facturesEnRetard = facturesList.filter((f) => f.statut !== "Payée" && f.echeance && f.echeance < today());
-    const facturesPayees = facturesList.filter((f) => f.statut === "Payée");
-    const caEncaisse = facturesPayees.reduce((s, f) => s + computeTotals(f.lignes, f.remiseGlobale, tauxTVA).ttc, 0);
-    const enAttente = facturesList.filter((f) => f.statut !== "Payée");
-    const montantEnAttente = enAttente.reduce((s, f) => s + computeTotals(f.lignes, f.remiseGlobale, tauxTVA).ttc, 0);
-    const montantEnRetard = facturesEnRetard.reduce((s, f) => s + computeTotals(f.lignes, f.remiseGlobale, tauxTVA).ttc, 0);
-
-    const commandesEnCours = commandesList.filter((c) => !["Reçue", "Annulée"].includes(c.statut));
-    const montantEngage = commandesEnCours.reduce((s, c) => s + computeTotals(c.lignes, c.remiseGlobale, tauxTVA).ttc, 0);
-
-    const devisARelancer = devisList.filter(
-      (d) => d.statut === "Envoyé" && daysSince(d.date) >= (Number(settings.relanceJours) || 7)
-    );
-
-    return { devisTotal, tauxConversion, facturesEnRetard, caEncaisse, montantEnAttente, montantEnRetard, commandesEnCours, montantEngage, devisARelancer };
-  }, [devisList, facturesList, commandesList, settings.tauxTVA, settings.relanceJours]);
-
-  const recentDevis = [...devisList].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 5);
-  const recentFactures = [...facturesList].sort((a, b) => (b.dateEmission || "").localeCompare(a.dateEmission || "")).slice(0, 5);
-
-  return (
-    <div>
-      {stats.facturesEnRetard.length > 0 && (
-        <div className="flex items-center gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3 mb-4">
-          <AlertTriangle size={16} />
-          {stats.facturesEnRetard.length} facture{stats.facturesEnRetard.length > 1 ? "s" : ""} en retard de paiement, pour {money(stats.montantEnRetard)}.
-        </div>
-      )}
-
-      {stats.devisARelancer.length > 0 && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-          <div className="flex items-center gap-2 text-sm text-amber-800 font-medium mb-2">
-            <Clock size={16} />
-            {stats.devisARelancer.length} devis à relancer (envoyé{stats.devisARelancer.length > 1 ? "s" : ""} depuis plus de {settings.relanceJours || 7} jours sans réponse)
-          </div>
-          <ul className="space-y-1">
-            {stats.devisARelancer.slice(0, 5).map((d) => (
-              <li key={d.id} className="flex items-center justify-between text-xs text-amber-700">
-                <span>{d.numero} — {clientName(d.clientId)} ({daysSince(d.date)} j.)</span>
-                <button onClick={() => openPreview("devis", d)} className="text-amber-700 hover:underline">Voir</button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <KpiCard icon={<FileText size={14} />} label="Devis en cours" value={devisList.length} sub={money(stats.devisTotal) + " au total"} />
-        <KpiCard icon={<TrendingUp size={14} />} label="Taux d'acceptation" value={`${stats.tauxConversion}%`} sub="des devis émis" />
-        <KpiCard icon={<Clock size={14} />} label="Factures en attente" value={money(stats.montantEnAttente)} sub="non encore payées" />
-        <KpiCard icon={<CircleDollarSign size={14} />} label="CA encaissé" value={money(stats.caEncaisse)} sub="factures payées" accent="text-emerald-600" />
-        <KpiCard icon={<ShoppingCart size={14} />} label="Commandes en cours" value={stats.commandesEnCours.length} sub="non reçues / non annulées" />
-        <KpiCard icon={<CircleDollarSign size={14} />} label="Montant engagé achats" value={money(stats.montantEngage)} sub="commandes en cours" />
-      </div>
-
-      <div className="grid md:grid-cols-2 gap-4">
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-            <h4 className="font-semibold text-slate-800 text-sm">Derniers devis</h4>
-            <button onClick={() => setTab("devis")} className="text-xs text-amber-600 hover:underline">Voir tout</button>
-          </div>
-          {recentDevis.length === 0 ? (
-            <div className="px-4 py-6 text-center text-slate-400 text-sm">Aucun devis pour le moment.</div>
-          ) : (
-            <ul>
-              {recentDevis.map((d) => (
-                <li key={d.id} className="flex items-center justify-between px-4 py-2.5 border-t border-slate-100 first:border-t-0 text-sm">
-                  <div>
-                    <div className="font-medium text-slate-800">{d.numero}</div>
-                    <div className="text-xs text-slate-400">{clientName(d.clientId)}</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <StatusBadge statut={d.statut} />
-                    <button onClick={() => openPreview("devis", d)} className="text-slate-400 hover:text-amber-600"><Printer size={14} /></button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-            <h4 className="font-semibold text-slate-800 text-sm">Dernières factures</h4>
-            <button onClick={() => setTab("factures")} className="text-xs text-amber-600 hover:underline">Voir tout</button>
-          </div>
-          {recentFactures.length === 0 ? (
-            <div className="px-4 py-6 text-center text-slate-400 text-sm">Aucune facture pour le moment.</div>
-          ) : (
-            <ul>
-              {recentFactures.map((f) => {
-                const st = f.statut === "Payée" ? "Payée" : f.echeance < today() ? "En retard" : f.statut;
-                return (
-                  <li key={f.id} className="flex items-center justify-between px-4 py-2.5 border-t border-slate-100 first:border-t-0 text-sm">
-                    <div>
-                      <div className="font-medium text-slate-800">{f.numero}</div>
-                      <div className="text-xs text-slate-400">{clientName(f.clientId)}</div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <StatusBadge statut={st} />
-                      <button onClick={() => openPreview("facture", f)} className="text-slate-400 hover:text-amber-600"><Printer size={14} /></button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------- */
-/* App                                                                    */
-/* ---------------------------------------------------------------------- */
-
-/* ---------------------------------------------------------------------- */
-/* Recherche globale                                                      */
-/* ---------------------------------------------------------------------- */
-
-function GlobalSearch({ devisList, facturesList, commandesList, clients, fournisseurs, settings, onSelectDoc, onSelectTab, className = "" }) {
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-
-  const results = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (q.length < 2) return null;
-    const clientName = (id) => clients.find((c) => c.id === id)?.societe || "";
-    const fournisseurName = (id) => fournisseurs.find((f) => f.id === id)?.raisonSociale || "";
-
-    const devis = devisList
-      .filter((d) => `${d.numero} ${clientName(d.clientId)} ${d.objet}`.toLowerCase().includes(q))
-      .slice(0, 5);
-    const factures = facturesList
-      .filter((f) => `${f.numero} ${clientName(f.clientId)} ${f.objet}`.toLowerCase().includes(q))
-      .slice(0, 5);
-    const commandes = commandesList
-      .filter((c) => `${c.numero} ${fournisseurName(c.fournisseurId)} ${c.objet}`.toLowerCase().includes(q))
-      .slice(0, 5);
-    const clientsMatch = clients
-      .filter((c) => `${c.societe} ${c.ville} ${c.contact}`.toLowerCase().includes(q))
-      .slice(0, 5);
-    const fournisseursMatch = fournisseurs
-      .filter((f) => `${f.raisonSociale} ${f.specialite} ${f.marques}`.toLowerCase().includes(q))
-      .slice(0, 5);
-
-    return { devis, factures, commandes, clientsMatch, fournisseursMatch };
-  }, [query, devisList, facturesList, commandesList, clients, fournisseurs]);
-
-  const hasResults = results && (
-    results.devis.length || results.factures.length || results.commandes.length ||
-    results.clientsMatch.length || results.fournisseursMatch.length
-  );
-
-  const clientName = (id) => clients.find((c) => c.id === id)?.societe || "—";
-  const fournisseurName = (id) => fournisseurs.find((f) => f.id === id)?.raisonSociale || "—";
-
-  const pick = (fn) => {
-    fn();
-    setQuery("");
-    setOpen(false);
-  };
-
-  return (
-    <div className={`relative ${className}`}>
-      <div className="relative">
-        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-        <TextInput
-          value={query}
-          onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
-          onFocus={() => setOpen(true)}
-          placeholder="Rechercher un devis, une facture, un client…"
-          className="pl-9 w-full"
-        />
-        {query && (
-          <button onClick={() => { setQuery(""); setOpen(false); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-            <X size={14} />
-          </button>
-        )}
-      </div>
-
-      {open && results && (
-        <div className="absolute z-40 mt-1 w-full sm:w-96 max-h-[70vh] overflow-y-auto bg-white border border-slate-200 rounded-xl shadow-xl">
-          {!hasResults && (
-            <div className="px-4 py-6 text-center text-slate-400 text-sm">Aucun résultat pour « {query} ».</div>
-          )}
-          {results.devis.length > 0 && (
-            <div>
-              <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Devis</div>
-              {results.devis.map((d) => (
-                <button key={d.id} onClick={() => pick(() => onSelectDoc("devis", d))} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-slate-50 text-left">
-                  <span className="text-slate-700">{d.numero} — {clientName(d.clientId)}</span>
-                  <StatusBadge statut={d.statut} />
-                </button>
-              ))}
-            </div>
-          )}
-          {results.factures.length > 0 && (
-            <div>
-              <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-slate-400 font-semibold border-t border-slate-100">Factures</div>
-              {results.factures.map((f) => (
-                <button key={f.id} onClick={() => pick(() => onSelectDoc("facture", f))} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-slate-50 text-left">
-                  <span className="text-slate-700">{f.numero} — {clientName(f.clientId)}</span>
-                  <StatusBadge statut={f.statut} />
-                </button>
-              ))}
-            </div>
-          )}
-          {results.commandes.length > 0 && (
-            <div>
-              <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-slate-400 font-semibold border-t border-slate-100">Commandes d'achat</div>
-              {results.commandes.map((c) => (
-                <button key={c.id} onClick={() => pick(() => onSelectDoc("commande", c))} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-slate-50 text-left">
-                  <span className="text-slate-700">{c.numero} — {fournisseurName(c.fournisseurId)}</span>
-                  <StatusBadge statut={c.statut} />
-                </button>
-              ))}
-            </div>
-          )}
-          {results.clientsMatch.length > 0 && (
-            <div>
-              <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-slate-400 font-semibold border-t border-slate-100">Clients / sites</div>
-              {results.clientsMatch.map((c) => (
-                <button key={c.id} onClick={() => pick(() => onSelectTab("clients"))} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-slate-50 text-left">
-                  <span className="text-slate-700">{c.societe}</span>
-                  <span className="text-xs text-slate-400">{c.ville}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {results.fournisseursMatch.length > 0 && (
-            <div>
-              <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-slate-400 font-semibold border-t border-slate-100">Fournisseurs</div>
-              {results.fournisseursMatch.map((f) => (
-                <button key={f.id} onClick={() => pick(() => onSelectTab("fournisseurs"))} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-slate-50 text-left">
-                  <span className="text-slate-700">{f.raisonSociale}</span>
-                  <span className="text-xs text-slate-400">{f.specialite}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const NAV = [
-  { key: "accueil", label: "Tableau de bord", short: "Accueil", icon: LayoutDashboard },
-  { key: "devis", label: "Devis", short: "Devis", icon: FileText },
-  { key: "factures", label: "Factures", short: "Factures", icon: Receipt },
-  { key: "achats", label: "Commandes d'achat", short: "Achats", icon: ShoppingCart },
-  { key: "clients", label: "Clients", short: "Clients", icon: Users },
-  { key: "fournisseurs", label: "Fournisseurs", short: "Fourn.", icon: Truck },
-  { key: "catalogue", label: "Prestations", short: "Prest.", icon: Package },
-  { key: "cgv", label: "CGV", short: "CGV", icon: ScrollText },
-  { key: "parametres", label: "Paramètres", short: "Réglages", icon: SettingsIcon },
-];
-
-export default function App() {
-  const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState("accueil");
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
-  const [clients, setClients] = useState([]);
-  const [catalog, setCatalog] = useState(SEED_CATALOG);
-  const [devisList, setDevisList] = useState([]);
-  const [facturesList, setFacturesList] = useState([]);
-  const [fournisseurs, setFournisseurs] = useState(SEED_FOURNISSEURS);
-  const [commandesList, setCommandesList] = useState([]);
-  const [cgv, setCgv] = useState({ intro: CGV_INTRO, articles: CGV_ARTICLES_DEFAULT });
-  const [preview, setPreview] = useState(null); // { type, doc }
-  const [saveError, setSaveError] = useState("");
-
-  useEffect(() => {
-    (async () => {
-      const [s, c, cat, d, f, four, cda, cgvData] = await Promise.all([
-        loadKey("settings", DEFAULT_SETTINGS),
-        loadKey("clients", []),
-        loadKey("catalog", SEED_CATALOG),
-        loadKey("devis", []),
-        loadKey("factures", []),
-        loadKey("fournisseurs", SEED_FOURNISSEURS),
-        loadKey("commandes", []),
-        loadKey("cgv", { intro: CGV_INTRO, articles: CGV_ARTICLES_DEFAULT }),
-      ]);
-      setSettings(s);
-      setClients(c);
-      setCatalog(cat);
-      setDevisList(d);
-      setFacturesList(f);
-      setFournisseurs(four);
-      setCommandesList(cda);
-      setCgv(cgvData);
-      setLoading(false);
-    })();
-  }, []);
-
-  const persist = useCallback((key, setter) => async (value) => {
-    setter(value);
-    try {
-      await saveKey(key, value);
-    } catch (e) {
-      setSaveError("Échec de l'enregistrement — vos dernières modifications n'ont peut-être pas été sauvegardées.");
-    }
-  }, []);
-
-  const saveSettings = persist("settings", setSettings);
-  const saveClients = persist("clients", setClients);
-  const saveCatalog = persist("catalog", setCatalog);
-  const saveDevisList = persist("devis", setDevisList);
-  const saveFacturesList = persist("factures", setFacturesList);
-  const saveFournisseurs = persist("fournisseurs", setFournisseurs);
-  const saveCommandesList = persist("commandes", setCommandesList);
-  const saveCgv = persist("cgv", setCgv);
-
-  const exportBackup = () => {
-    const payload = {
-      app: "ht-devis-facture",
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      data: {
-        settings, clients, catalog, devis: devisList, factures: facturesList,
-        fournisseurs, commandes: commandesList, cgv,
+  // Vérifie que les données enregistrées (cache local ou cloud) correspondent
+  // au schéma actuel — sinon on repart des valeurs par défaut à jour plutôt
+  // que de charger d'anciennes structures incompatibles (ex: anciens tarifs
+  // multi-niveaux, ancien champ "heures" unique par équipement).
+  const tarifsValides = (t) => !!(t && t.expert && Object.keys(t).length === 1);
+  const catalogueTempsValide = (c) => !!(c && c.hta && c.hta.items && c.hta.items[0] && c.hta.items[0].heuresSimple != null);
+
+  const [tarifs, setTarifs] = useState(tarifsValides(saved.tarifs) ? saved.tarifs : DEFAULT_TARIFS);
+  const [majorations, setMajorations] = useState(saved.majorations || DEFAULT_MAJORATIONS);
+  const [degressivite, setDegressivite] = useState(saved.degressivite || DEFAULT_DEGRESSIVITE);
+  const [coefContrat, setCoefContrat] = useState(saved.coefContrat || DEFAULT_COEF_CONTRAT);
+  const [heuresJour, setHeuresJour] = useState(saved.heuresJour ?? 7);
+
+  const [catalogueTemps, setCatalogueTemps] = useState(catalogueTempsValide(saved.catalogueTemps) ? saved.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
+  const [catalogueCoef, setCatalogueCoef] = useState(saved.catalogueCoef || DEFAULT_CATALOGUE_COEF);
+  const [catalogueDirect, setCatalogueDirect] = useState(saved.catalogueDirect || DEFAULT_CATALOGUE_DIRECT);
+
+  // Contenu vierge d'un chiffrage — les tarifs/catalogues (ci-dessus) restent
+  // partagés entre tous les chiffrages, seuls affaire/postes/lignes sont propres
+  // à chaque chiffrage.
+  function devisVierge() {
+    return {
+      affaire: {
+        client: "",
+        site: "",
+        reference: "DEV-" + new Date().getFullYear() + "-001",
+        contrat: "aucun",
+        degressiviteActive: true,
       },
+      postesEquipement: [nouveauPosteEquipement(1)],
+      lignesLibres: [],
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  }
+
+  const [affaire, setAffaire] = useState(saved.affaire || devisVierge().affaire);
+  const [postesEquipement, setPostesEquipement] = useState(saved.postesEquipement || devisVierge().postesEquipement);
+  const [lignesLibres, setLignesLibres] = useState(saved.lignesLibres || []);
+  const [nbAAjouter, setNbAAjouter] = useState(1);
+
+  const addPosteEquipement = () => setPostesEquipement((ps) => [...ps, nouveauPosteEquipement(ps.length + 1)]);
+  const dupliquerPosteEquipement = (id) =>
+    setPostesEquipement((ps) => {
+      const src = ps.find((p) => p.id === id);
+      if (!src) return ps;
+      return [...ps, { ...src, id: uid(), nom: `${src.nom} (copie)`, quantites: { ...src.quantites }, niveaux: { ...(src.niveaux || {}) } }];
+    });
+  const updatePosteEquipement = (id, patch) => setPostesEquipement((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  const removePosteEquipement = (id) => setPostesEquipement((ps) => (ps.length > 1 ? ps.filter((p) => p.id !== id) : ps));
+  const setQtePoste = (posteId, itemId, v) =>
+    setPostesEquipement((ps) => ps.map((p) => (p.id === posteId ? { ...p, quantites: { ...p.quantites, [itemId]: Math.max(0, v) } } : p)));
+  const setNiveauPoste = (posteId, itemId, niveau) =>
+    setPostesEquipement((ps) => ps.map((p) => (p.id === posteId ? { ...p, niveaux: { ...(p.niveaux || {}), [itemId]: niveau } } : p)));
+
+  const [syncState, setSyncState] = useState("idle"); // idle | loading | syncing | synced | error
+  const [authReady, setAuthReady] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false); // évite un flash de l'écran de connexion pendant la toute première vérification
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  // Liste des chiffrages (devis) disponibles, et celui actuellement affiché.
+  const [devisList, setDevisList] = useState(saved.devisList || []);
+  const [currentDevisId, setCurrentDevisId] = useState(saved.currentDevisId || null);
+  const [devisReady, setDevisReady] = useState(false); // évite d'écraser un chiffrage avant la fin du chargement initial
+
+  // Accès protégé par email + mot de passe (Firebase Authentication). Pas de
+  // connexion automatique : tant que personne n'est identifié, l'app affiche
+  // un écran de connexion au lieu du chiffrage.
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user && user.isAnonymous) {
+        // Reliquat de l'ancienne connexion anonyme automatique : on l'efface,
+        // ça ne doit pas être considéré comme une connexion valide.
+        signOut(auth);
+        setCurrentUser(null);
+        setAuthReady(false);
+        setAuthChecked(true);
+        return;
+      }
+      setCurrentUser(user);
+      setAuthReady(!!user);
+      setAuthChecked(true);
+    });
+    return unsubscribe;
+  }, []);
+
+  const seConnecter = async (e) => {
+    e.preventDefault();
+    setLoginError("");
+    setLoginLoading(true);
+    try {
+      await signInWithEmailAndPassword(auth, loginEmail.trim(), loginPassword);
+    } catch (err) {
+      setLoginError("Adresse e-mail ou mot de passe incorrect.");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const seDeconnecter = () => {
+    signOut(auth);
+  };
+
+  // Charge les paramètres/catalogues globaux (partagés entre tous les chiffrages)
+  useEffect(() => {
+    if (!authReady) return;
+    setSyncState("loading");
+    getDoc(doc(db, FIRESTORE_DOC))
+      .then((snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          setTarifs(tarifsValides(data.tarifs) ? data.tarifs : DEFAULT_TARIFS);
+          if (data.majorations) setMajorations(data.majorations);
+          if (data.degressivite) setDegressivite(data.degressivite);
+          if (data.coefContrat) setCoefContrat(data.coefContrat);
+          if (data.heuresJour != null) setHeuresJour(data.heuresJour);
+          setCatalogueTemps(catalogueTempsValide(data.catalogueTemps) ? data.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
+          if (data.catalogueCoef) setCatalogueCoef(data.catalogueCoef);
+          if (data.catalogueDirect) setCatalogueDirect(data.catalogueDirect);
+        }
+        setSyncState("synced");
+      })
+      .catch(() => setSyncState("error"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady]);
+
+  // Charge la liste des chiffrages existants, puis affiche le dernier ouvert
+  // (ou en crée un premier si la liste est vide).
+  useEffect(() => {
+    if (!authReady) return;
+    getDocs(collection(db, DEVIS_COLLECTION))
+      .then(async (snap) => {
+        let list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        if (list.length === 0) {
+          const blank = devisVierge();
+          const payload = { ...blank, updatedAt: Date.now() };
+          const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
+          list = [{ id: ref.id, ...payload }];
+        }
+        setDevisList(list.map((d) => ({ id: d.id, reference: d.affaire?.reference, client: d.affaire?.client, updatedAt: d.updatedAt })));
+        const target = list.find((d) => d.id === currentDevisId) || list[0];
+        setCurrentDevisId(target.id);
+        setAffaire(target.affaire || devisVierge().affaire);
+        setPostesEquipement(target.postesEquipement || devisVierge().postesEquipement);
+        setLignesLibres(target.lignesLibres || []);
+        setDevisReady(true);
+      })
+      .catch(() => setSyncState("error"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady]);
+
+  // Passe à un autre chiffrage existant (sélecteur)
+  const chargerDevis = (id) => {
+    setDevisReady(false);
+    getDoc(doc(db, DEVIS_COLLECTION, id))
+      .then((snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          setCurrentDevisId(id);
+          setAffaire(data.affaire || devisVierge().affaire);
+          setPostesEquipement(data.postesEquipement || devisVierge().postesEquipement);
+          setLignesLibres(data.lignesLibres || []);
+        }
+        setDevisReady(true);
+      })
+      .catch(() => setDevisReady(true));
+  };
+
+  const nouveauChiffrage = async () => {
+    const blank = devisVierge();
+    setDevisReady(false);
+    try {
+      const payload = { ...blank, updatedAt: Date.now() };
+      const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
+      setDevisList((l) => [{ id: ref.id, reference: blank.affaire.reference, client: "", updatedAt: payload.updatedAt }, ...l]);
+      setCurrentDevisId(ref.id);
+      setAffaire(blank.affaire);
+      setPostesEquipement(blank.postesEquipement);
+      setLignesLibres(blank.lignesLibres);
+    } finally {
+      setDevisReady(true);
+    }
+  };
+
+  const dupliquerChiffrage = async () => {
+    setDevisReady(false);
+    try {
+      const payload = {
+        affaire: { ...affaire, reference: affaire.reference + " (copie)" },
+        postesEquipement: postesEquipement.map((p) => ({ ...p, quantites: { ...p.quantites } })),
+        lignesLibres: lignesLibres.map((l) => ({ ...l })),
+        updatedAt: Date.now(),
+      };
+      const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
+      setDevisList((l) => [{ id: ref.id, reference: payload.affaire.reference, client: payload.affaire.client, updatedAt: payload.updatedAt }, ...l]);
+      setCurrentDevisId(ref.id);
+      setAffaire(payload.affaire);
+      setPostesEquipement(payload.postesEquipement);
+      setLignesLibres(payload.lignesLibres);
+    } finally {
+      setDevisReady(true);
+    }
+  };
+
+  const supprimerChiffrage = async () => {
+    if (devisList.length <= 1) return;
+    if (!window.confirm(`Supprimer définitivement le chiffrage « ${affaire.reference} » ? Cette action est irréversible.`)) return;
+    const idASupprimer = currentDevisId;
+    try {
+      await deleteDoc(doc(db, DEVIS_COLLECTION, idASupprimer));
+    } catch {
+      // on continue quand même côté interface
+    }
+    const reste = devisList.filter((d) => d.id !== idASupprimer);
+    setDevisList(reste);
+    chargerDevis(reste[0].id);
+  };
+
+  // Enregistre automatiquement les paramètres/catalogues (partagés entre
+  // chiffrages) dans le cloud, après une courte pause.
+  useEffect(() => {
+    if (!authReady) return;
+    const payload = { tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect };
+    const t = setTimeout(() => {
+      setDoc(doc(db, FIRESTORE_DOC), payload)
+        .then(() => setSyncState("synced"))
+        .catch(() => setSyncState("error"));
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [authReady, tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect]);
+
+  // Enregistre automatiquement le chiffrage courant (affaire + postes +
+  // lignes libres) dans son propre document, sans toucher aux autres.
+  useEffect(() => {
+    if (!authReady || !devisReady || !currentDevisId) return;
+    setSyncState("syncing");
+    const t = setTimeout(() => {
+      const payload = { affaire, postesEquipement, lignesLibres, updatedAt: Date.now() };
+      setDoc(doc(db, DEVIS_COLLECTION, currentDevisId), payload)
+        .then(() => {
+          setSyncState("synced");
+          setDevisList((l) => l.map((d) => (d.id === currentDevisId ? { ...d, reference: affaire.reference, client: affaire.client, updatedAt: payload.updatedAt } : d)));
+        })
+        .catch(() => setSyncState("error"));
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [authReady, devisReady, currentDevisId, affaire, postesEquipement, lignesLibres]);
+
+  // Cache local (rechargement rapide avant que le cloud ne réponde)
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          tarifs,
+          majorations,
+          degressivite,
+          coefContrat,
+          heuresJour,
+          catalogueTemps,
+          catalogueCoef,
+          catalogueDirect,
+          affaire,
+          postesEquipement,
+          lignesLibres,
+          devisList,
+          currentDevisId,
+        })
+      );
+    } catch {
+      // stockage local indisponible (navigation privée, quota dépassé...) — on continue sans bloquer
+    }
+  }, [tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect, affaire, postesEquipement, lignesLibres, devisList, currentDevisId]);
+
+  // Enregistre immédiatement les paramètres/catalogues, sans attendre le
+  // délai automatique (utile pour une confirmation explicite à l'utilisateur).
+  const enregistrerParametresMaintenant = () => {
+    setSyncState("syncing");
+    setDoc(doc(db, FIRESTORE_DOC), { tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect })
+      .then(() => setSyncState("synced"))
+      .catch(() => setSyncState("error"));
+  };
+
+  const reinitialiserParametres = () => {
+    if (!window.confirm("Réinitialiser tous les paramètres et catalogues aux valeurs par défaut ?")) return;
+    setTarifs(DEFAULT_TARIFS);
+    setMajorations(DEFAULT_MAJORATIONS);
+    setDegressivite(DEFAULT_DEGRESSIVITE);
+    setCoefContrat(DEFAULT_COEF_CONTRAT);
+    setHeuresJour(7);
+    setCatalogueTemps(DEFAULT_CATALOGUE_TEMPS);
+    setCatalogueCoef(DEFAULT_CATALOGUE_COEF);
+    setCatalogueDirect(DEFAULT_CATALOGUE_DIRECT);
+  };
+
+  // RAZ du chiffrage en cours : vide l'affaire, les postes d'équipements et
+  // les lignes libres pour repartir sur un devis neuf. Ne touche pas aux
+  // tarifs/catalogues de Paramètres.
+  const razChiffrage = () => {
+    if (!window.confirm("Remettre à zéro le chiffrage en cours (infos affaire, équipements saisis, lignes libres) ? Cette action est irréversible.")) return;
+    const blank = devisVierge();
+    setAffaire(blank.affaire);
+    setPostesEquipement(blank.postesEquipement);
+    setLignesLibres(blank.lignesLibres);
+  };
+
+
+  const addLigneLibre = (n = 1) =>
+    setLignesLibres((ls) => [
+      ...ls,
+      ...Array.from({ length: Math.max(1, Math.round(n)) }, () => ({
+        id: uid(),
+        famille: "batteries",
+        quantite: 1,
+        niveauTechnicien: "expert",
+        typeJournee: "semaine",
+        prixAchatUnitaire: 20,
+        libelleManuel: "",
+        joursManuel: 1,
+        prixJour: tarifs.expert.jour,
+      })),
+    ]);
+  const updateLigneLibre = (id, patch) => setLignesLibres((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  const removeLigneLibre = (id) => setLignesLibres((ls) => ls.filter((l) => l.id !== id));
+
+  function computeLigneLibre(l) {
+    const famille = FAMILLES_LIBRES.find((f) => f.id === l.famille);
+    const majoration = majorations[l.typeJournee];
+    let montant = 0;
+    let joursHomme = 0;
+    let detail = "";
+    if (famille.type === "coef") {
+      const cat = catalogueCoef[l.famille];
+      const categorie = findCoefCategory(cat, l.prixAchatUnitaire);
+      montant = l.prixAchatUnitaire * categorie.coef * l.quantite;
+      detail = `${euros(l.prixAchatUnitaire)} × coef ${categorie.coef} (${categorie.label}) × ${l.quantite}`;
+    } else {
+      joursHomme = l.joursManuel * l.quantite;
+      montant = joursHomme * l.prixJour * majoration.coef;
+      detail = `${l.joursManuel} j/u × ${l.quantite} × ${euros(l.prixJour)}/j × ${majoration.coef}`;
+    }
+    return { montant, joursHomme, detail };
+  }
+
+  // ---- Lignes issues des postes d'équipements (quantité > 0 uniquement) ----
+  const lignesCatalogue = useMemo(() => {
+    const out = [];
+    postesEquipement.forEach((poste) => {
+      const majoration = majorations[poste.typeJournee];
+      Object.entries(catalogueTemps).forEach(([famId, cat]) => {
+        cat.items.forEach((item) => {
+          const qte = poste.quantites[item.id] || 0;
+          if (qte > 0) {
+            const tarif = tarifs.expert;
+            const niveau = (poste.niveaux && poste.niveaux[item.id]) || item.niveauDefaut || "complet";
+            const heures = heuresPourNiveau(item, niveau);
+            const joursHomme = (heures / heuresJour) * qte;
+            const montantUnitaire = (heures / heuresJour) * tarif.jour * majoration.coef + item.amort;
+            out.push({ id: `${poste.id}-${item.id}`, posteId: poste.id, posteNom: poste.nom, famille: famId, label: item.label, qte, joursHomme, montant: montantUnitaire * qte });
+          }
+        });
+      });
+      Object.entries(catalogueDirect).forEach(([famId, cat]) => {
+        cat.items.forEach((item) => {
+          const qte = poste.quantites[item.id] || 0;
+          if (qte > 0) {
+            out.push({ id: `${poste.id}-${item.id}`, posteId: poste.id, posteNom: poste.nom, famille: famId, label: item.label, qte, joursHomme: 0, montant: item.prix * qte });
+          }
+        });
+      });
+    });
+    return out;
+  }, [postesEquipement, catalogueTemps, catalogueDirect, tarifs, majorations, heuresJour]);
+
+  const lignesLibresCalc = useMemo(() => lignesLibres.map((l) => ({ ligne: l, ...computeLigneLibre(l) })), [
+    lignesLibres,
+    tarifs,
+    majorations,
+    catalogueCoef,
+  ]);
+
+  // Les lignes libres (batteries, composants, poste manuel) ne comptent pas
+  // comme des équipements pour le calcul de la dégressivité — seuls les
+  // équipements physiques du catalogue (hors analyses d'huile et TGBT) comptent.
+  const totalEquipements = lignesCatalogue.reduce((s, l) => s + (l.famille === "analyseHuile" || l.famille === "tgbt" ? 0 : l.qte), 0);
+
+  const totalJoursHomme =
+    lignesCatalogue.reduce((s, l) => s + l.joursHomme, 0) + lignesLibresCalc.reduce((s, l) => s + l.joursHomme, 0);
+
+  const totalAvantCoef =
+    lignesCatalogue.reduce((s, l) => s + l.montant, 0) + lignesLibresCalc.reduce((s, l) => s + l.montant, 0);
+
+  const palierDegressif =
+    degressivite.find((d) => totalEquipements > d.min && totalEquipements <= d.max) || degressivite[degressivite.length - 1];
+  const coefContratActif = coefContrat[affaire.contrat] || { coef: 1, label: "—" };
+
+  const totalApresDegressivite = affaire.degressiviteActive ? totalAvantCoef * palierDegressif.coef : totalAvantCoef;
+  const totalFinal = totalApresDegressivite * coefContratActif.coef;
+
+  const parFamille = useMemo(() => {
+    const map = {};
+    lignesCatalogue.forEach((l) => (map[l.famille] = (map[l.famille] || 0) + l.montant));
+    lignesLibresCalc.forEach((l) => (map[l.ligne.famille] = (map[l.ligne.famille] || 0) + l.montant));
+    return map;
+  }, [lignesCatalogue, lignesLibresCalc]);
+
+  const nbEquipementsSaisis =
+    postesEquipement.reduce((s, p) => s + Object.values(p.quantites).filter((v) => v > 0).length, 0) + lignesLibres.length;
+
+  // ---- Export Word (.docx) ----
+  // Génère un vrai fichier .docx (Office Open XML), ouvrable par Word, Pages
+  // et Google Docs — nécessite `npm install docx` dans le projet.
+  async function exportWord() {
+    const dateStr = new Date().toLocaleDateString("fr-FR");
+
+    const noBorder = { style: "none", size: 0, color: "FFFFFF" };
+    const noBorders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder };
+
+    // Largeur totale utile de la page (twips) : A4, marges par défaut ~1440
+    // twips de chaque côté sur une page de 12240 twips → ~9360 twips utiles.
+    const PAGE_WIDTH = 9360;
+    const colWidths = (percents) => percents.map((p) => Math.round((PAGE_WIDTH * p) / 100));
+
+    const txt = (text, opts = {}) => new TextRun({ text: String(text), bold: !!opts.bold, color: opts.color });
+    const para = (text, opts = {}) => new Paragraph({ alignment: opts.right ? AlignmentType.RIGHT : AlignmentType.LEFT, children: [txt(text, opts)] });
+
+    // --- Tableau infos affaire (2 colonnes) ---
+    const infoW = colWidths([30, 70]);
+    const infoRows = [
+      ["Référence", affaire.reference || "—"],
+      ["Client", affaire.client || "—"],
+      ["Site", affaire.site || "—"],
+      ["Date", dateStr],
+      ["Cadre contractuel", coefContratActif.label],
+    ].map(
+      ([label, value]) =>
+        new TableRow({
+          children: [
+            new TableCell({ width: { size: infoW[0], type: WidthType.DXA }, borders: noBorders, children: [para(label, { bold: true })] }),
+            new TableCell({ width: { size: infoW[1], type: WidthType.DXA }, borders: noBorders, children: [para(value)] }),
+          ],
+        })
+    );
+    const infoTable = new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: infoW, rows: infoRows });
+
+    // --- Tableau détail équipements (5 colonnes) ---
+    const equipW = colWidths([28, 15, 22, 10, 25]);
+    const headerCell = (text, i) =>
+      new TableCell({ width: { size: equipW[i], type: WidthType.DXA }, shading: { type: ShadingType.SOLID, fill: "1B2733" }, children: [para(text, { bold: true, color: "FFFFFF" })] });
+    const dataCell = (text, i, opts = {}) => new TableCell({ width: { size: equipW[i], type: WidthType.DXA }, children: [para(text, opts)] });
+
+    const equipHeader = new TableRow({ children: ["Désignation", "Poste", "Famille", "Qté", "Montant HT"].map(headerCell) });
+    const equipDataRows = [
+      ...lignesCatalogue.map(
+        (l) =>
+          new TableRow({
+            children: [
+              dataCell(l.label, 0),
+              dataCell(l.posteNom, 1),
+              dataCell(LABEL_FAMILLE[l.famille] || l.famille, 2),
+              dataCell(l.qte, 3, { right: true }),
+              dataCell(euros(l.montant), 4, { right: true }),
+            ],
+          })
+      ),
+      ...lignesLibresCalc.map(
+        ({ ligne: l, montant }) =>
+          new TableRow({
+            children: [
+              dataCell(l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille], 0),
+              dataCell("—", 1),
+              dataCell(LABEL_FAMILLE[l.famille] || l.famille, 2),
+              dataCell(l.quantite, 3, { right: true }),
+              dataCell(euros(montant), 4, { right: true }),
+            ],
+          })
+      ),
+    ];
+    if (equipDataRows.length === 0) {
+      equipDataRows.push(new TableRow({ children: [new TableCell({ columnSpan: 5, children: [para("Aucun équipement renseigné")] })] }));
+    }
+    const equipTable = new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: equipW, rows: [equipHeader, ...equipDataRows] });
+
+    // --- Tableau récapitulatif financier (2 colonnes) ---
+    const recapW = colWidths([70, 30]);
+    const degressiviteLabel = affaire.degressiviteActive ? `Dégressivité volume (${palierDegressif.label}, ×${palierDegressif.coef})` : "Dégressivité volume (désactivée)";
+    const recapRows = [
+      ["Nombre total d'équipements", totalEquipements, false],
+      ["Total jours-hommes", `${totalJoursHomme.toFixed(2)} j`, false],
+      ["Montant HT avant coefficients", euros(totalAvantCoef), false],
+      [degressiviteLabel, euros(totalApresDegressivite), false],
+      [`Coefficient contractuel — ${coefContratActif.label} (×${coefContratActif.coef})`, euros(totalFinal), false],
+      ["TOTAL HT OFFRE", euros(totalFinal), true],
+    ].map(
+      ([label, value, bold]) =>
+        new TableRow({
+          children: [
+            new TableCell({ width: { size: recapW[0], type: WidthType.DXA }, borders: noBorders, children: [para(label, { bold })] }),
+            new TableCell({ width: { size: recapW[1], type: WidthType.DXA }, borders: noBorders, children: [para(value, { bold, right: true })] }),
+          ],
+        })
+    );
+    const recapTable = new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: recapW, rows: recapRows });
+
+    const doc = new Document({
+      sections: [
+        {
+          children: [
+            new Paragraph({ text: "Offre de chiffrage — HT Maintenance", heading: HeadingLevel.HEADING_1 }),
+            infoTable,
+            new Paragraph({ text: "", spacing: { after: 200 } }),
+            new Paragraph({ text: "Détail des équipements et prestations", heading: HeadingLevel.HEADING_2, spacing: { before: 200 } }),
+            equipTable,
+            new Paragraph({ text: "", spacing: { after: 200 } }),
+            new Paragraph({ text: "Récapitulatif financier", heading: HeadingLevel.HEADING_2, spacing: { before: 200 } }),
+            recapTable,
+          ],
+        },
+      ],
+    });
+
+    const blob = await Packer.toBlob(doc);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    const stamp = new Date().toISOString().slice(0, 10);
     a.href = url;
-    a.download = `ht-devis-facture-sauvegarde-${stamp}.json`;
+    a.download = `Offre_${(affaire.reference || "HT-Maintenance").replace(/[^a-zA-Z0-9_-]/g, "_")}.docx`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
+  }
 
-  const importBackup = (file) => {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      let parsed;
-      try {
-        parsed = JSON.parse(reader.result);
-      } catch (e) {
-        alert(`Impossible de lire "${file.name}" — ce n'est pas un fichier de sauvegarde valide.`);
-        return;
-      }
-      const data = parsed && parsed.data ? parsed.data : parsed;
-      const found = ["settings", "clients", "catalog", "devis", "factures", "fournisseurs", "commandes", "cgv"].filter((k) => data && data[k] !== undefined);
-      if (found.length === 0) {
-        alert(`"${file.name}" ne contient aucune donnée reconnue.`);
-        return;
-      }
-      if (!confirm(`Restaurer "${file.name}" va remplacer toutes les données actuelles (${found.join(", ")}). Continuer ?`)) return;
-      if (data.settings) await saveSettings(data.settings);
-      if (data.clients) await saveClients(data.clients);
-      if (data.catalog) await saveCatalog(data.catalog);
-      if (data.devis) await saveDevisList(data.devis);
-      if (data.factures) await saveFacturesList(data.factures);
-      if (data.fournisseurs) await saveFournisseurs(data.fournisseurs);
-      if (data.commandes) await saveCommandesList(data.commandes);
-      if (data.cgv) await saveCgv(data.cgv);
-      alert("Sauvegarde restaurée avec succès.");
-    };
-    reader.onerror = () => alert(`Impossible de lire "${file.name}".`);
-    reader.readAsText(file);
-  };
+  const tabBtn = (id, label, Icon) => (
+    <button
+      onClick={() => setTab(id)}
+      className="flex items-center gap-2 px-4 py-2.5 text-sm transition-colors"
+      style={{
+        color: tab === id ? INK : MUTED,
+        fontWeight: tab === id ? 600 : 500,
+        borderBottom: tab === id ? `2px solid ${AMBER}` : "2px solid transparent",
+      }}
+    >
+      <Icon size={15} />
+      {label}
+    </button>
+  );
 
-  const openPreview = (type, doc) => setPreview({ type, doc });
-
-  if (loading) {
+  // Écran de connexion : affiché tant que personne n'est identifié (ou
+  // pendant la toute première vérification, pour éviter un flash).
+  if (!authChecked || !currentUser) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-400 text-sm">
-        Chargement…
+      <div style={{ background: PAPER, minHeight: "100%", fontFamily: "Inter, system-ui, sans-serif", colorScheme: "light" }} className="w-full flex items-center justify-center" >
+        <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10, minWidth: 320, maxWidth: 380 }} className="p-6 mx-4">
+          {authChecked && (
+            <>
+              <div className="flex items-center gap-3 mb-5">
+                <div style={{ background: AMBER, width: 34, height: 34, borderRadius: 8 }} className="flex items-center justify-center shrink-0">
+                  <Zap size={18} color={INK} strokeWidth={2.5} />
+                </div>
+                <div>
+                  <div style={{ color: INK, fontWeight: 700, fontSize: 16 }}>HT Maintenance</div>
+                  <div style={{ color: MUTED, fontSize: 12 }}>Outil de chiffrage — accès protégé</div>
+                </div>
+              </div>
+              <form onSubmit={seConnecter} className="flex flex-col gap-3">
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Adresse e-mail</label>
+                  <TextField value={loginEmail} onChange={setLoginEmail} placeholder="vous@exemple.com" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Mot de passe</label>
+                  <input
+                    type="password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    style={{ border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 9px", fontSize: 13, color: INK, background: "#fff", colorScheme: "light", width: "100%" }}
+                  />
+                </div>
+                {loginError && <div style={{ color: "#B0473E", fontSize: 12.5 }}>{loginError}</div>}
+                <button
+                  type="submit"
+                  disabled={loginLoading}
+                  className="w-full py-2 rounded-md text-sm font-medium mt-1"
+                  style={{ background: AMBER, color: INK, opacity: loginLoading ? 0.6 : 1 }}
+                >
+                  {loginLoading ? "Connexion…" : "Se connecter"}
+                </button>
+              </form>
+            </>
+          )}
+        </div>
       </div>
     );
   }
 
-  const previewClient = preview
-    ? preview.type === "commande"
-      ? fournisseurs.find((f) => f.id === preview.doc.fournisseurId)
-      : clients.find((c) => c.id === preview.doc.clientId)
-    : null;
-  const previewChantier =
-    preview && preview.type === "commande" && preview.doc.chantierId
-      ? clients.find((c) => c.id === preview.doc.chantierId)
-      : null;
-
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row text-slate-800">
-      {/* Barre mobile (haut) */}
-      <div className="md:hidden sticky top-0 z-30 flex items-center gap-2 bg-slate-900 text-white px-4 py-3 no-print">
-        <img src={SIDEBAR_LOGO_DATA_URI} alt={settings.entreprise} className="h-7 object-contain shrink-0" />
-        <div className="min-w-0">
-          <div className="text-[11px] text-slate-400 leading-tight truncate">{NAV.find((n) => n.key === tab)?.label}</div>
+    <div style={{ background: PAPER, minHeight: "100%", fontFamily: "Inter, system-ui, sans-serif", colorScheme: "light" }} className="w-full">
+      {/* Header */}
+      <div style={{ background: INK }} className="px-4 md:px-6 py-4 md:py-5">
+        <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-3">
+            <div style={{ background: AMBER, width: 34, height: 34, borderRadius: 8 }} className="flex items-center justify-center shrink-0">
+              <Zap size={18} color={INK} strokeWidth={2.5} />
+            </div>
+            <div>
+              <div style={{ color: "#fff", fontWeight: 700, fontSize: 16, letterSpacing: 0.2 }}>HT Maintenance</div>
+              <div style={{ color: "#9AA6B2", fontSize: 12 }} className="hidden sm:block">Outil de chiffrage — HTA / BT</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 flex-wrap">
+            <span style={{ color: "#9AA6B2", fontSize: 11 }}>
+              {syncState === "loading" && "Chargement…"}
+              {syncState === "syncing" && "Enregistrement…"}
+              {syncState === "synced" && "✓ Synchronisé"}
+              {syncState === "error" && "⚠ Hors ligne"}
+            </span>
+            <div style={{ color: "#9AA6B2", fontSize: 12 }}>{affaire.reference}</div>
+            <button onClick={seDeconnecter} style={{ color: "#9AA6B2", fontSize: 11 }} className="underline">
+              Déconnexion
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Barre latérale (desktop) */}
-      <aside className="hidden md:flex md:w-60 bg-slate-900 text-slate-300 flex-col shrink-0 no-print">
-        <div className="flex items-center px-5 py-5 border-b border-slate-800">
-          <img src={SIDEBAR_LOGO_DATA_URI} alt={settings.entreprise} className="h-11 object-contain" />
+      {/* Tabs */}
+      <div style={{ background: "#fff", borderBottom: `1px solid ${LINE}` }}>
+        <div className="max-w-6xl mx-auto flex px-4 md:px-6 overflow-x-auto">
+          {tabBtn("chiffrage", "Chiffrage", ClipboardList)}
+          {tabBtn("recap", "Récapitulatif", FileText)}
+          {tabBtn("parametres", "Paramètres & catalogue", Settings2)}
         </div>
-        <nav className="flex-1 py-3">
-          {NAV.map((n) => {
-            const Icon = n.icon;
-            const active = tab === n.key;
-            return (
-              <button
-                key={n.key}
-                onClick={() => setTab(n.key)}
-                className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm transition-colors ${
-                  active ? "bg-slate-800 text-amber-400 font-medium border-r-2 border-amber-400" : "hover:bg-slate-800/60 hover:text-white"
-                }`}
-              >
-                <Icon size={16} /> {n.label}
-              </button>
-            );
-          })}
-        </nav>
-        <div className="px-5 py-4 text-[11px] text-slate-600 border-t border-slate-800">
-          CGV {settings.versionCGV}
-        </div>
-      </aside>
+      </div>
 
-      {/* Barre mobile (bas) */}
-      <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-slate-900 border-t border-slate-800 flex overflow-x-auto no-print">
-        {NAV.map((n) => {
-          const Icon = n.icon;
-          const active = tab === n.key;
-          return (
-            <button
-              key={n.key}
-              onClick={() => setTab(n.key)}
-              className={`flex flex-col items-center gap-0.5 py-2 px-3 min-w-[64px] text-[10px] shrink-0 ${active ? "text-amber-400" : "text-slate-400"}`}
+      <div className="max-w-6xl mx-auto px-4 md:px-6 py-5 md:py-6 flex flex-col gap-5">
+        {/* ---------------- ONGLET CHIFFRAGE ---------------- */}
+        {tab === "chiffrage" && (
+          <>
+            <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="p-4 flex flex-wrap items-center gap-3 justify-between">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span style={{ fontSize: 11, color: MUTED }}>Chiffrage</span>
+                <Select
+                  value={currentDevisId || ""}
+                  onChange={(id) => chargerDevis(id)}
+                  options={devisList.map((d) => ({ value: d.id, label: `${d.reference || "Sans référence"}${d.client ? " — " + d.client : ""}` }))}
+                  style={{ minWidth: 240, width: "auto" }}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={nouveauChiffrage} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                  <Plus size={15} /> Nouveau
+                </button>
+                <button onClick={dupliquerChiffrage} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: INK_2 }}>
+                  <Copy size={14} /> Dupliquer
+                </button>
+                {devisList.length > 1 && (
+                  <button onClick={supprimerChiffrage} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: "#B0473E" }}>
+                    <Trash2 size={14} /> Supprimer
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <SectionCard
+              title="Informations de l'affaire"
+              icon={FileText}
+              right={
+                <button onClick={razChiffrage} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: "#B0473E" }}>
+                  <Trash2 size={14} /> RAZ le chiffrage
+                </button>
+              }
             >
-              <Icon size={18} />
-              {n.short}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Référence</label>
+                  <TextField value={affaire.reference} onChange={(v) => setAffaire((a) => ({ ...a, reference: v }))} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Client</label>
+                  <TextField value={affaire.client} onChange={(v) => setAffaire((a) => ({ ...a, client: v }))} placeholder="Nom du client" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Site</label>
+                  <TextField value={affaire.site} onChange={(v) => setAffaire((a) => ({ ...a, site: v }))} placeholder="Site / adresse" />
+                </div>
+              </div>
+              <div className="flex items-end gap-6">
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Cadre contractuel</label>
+                  <Select
+                    value={affaire.contrat}
+                    onChange={(v) => setAffaire((a) => ({ ...a, contrat: v }))}
+                    options={Object.entries(coefContrat).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
+                    style={{ maxWidth: 320 }}
+                  />
+                </div>
+                <label className="flex items-center gap-2 pb-2" style={{ fontSize: 13, color: INK, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={affaire.degressiviteActive}
+                    onChange={(e) => setAffaire((a) => ({ ...a, degressiviteActive: e.target.checked }))}
+                  />
+                  Appliquer la dégressivité volume
+                </label>
+              </div>
+            </SectionCard>
+
+            {postesEquipement.map((poste) => (
+              <SectionCard
+                key={poste.id}
+                title={poste.nom}
+                subtitle="Renseignez une quantité pour autant de types d'équipements que nécessaire — pas de limite"
+                icon={ClipboardList}
+                right={
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => dupliquerPosteEquipement(poste.id)} title="Dupliquer ce poste" style={{ color: INK_2 }} className="p-1.5">
+                      <Copy size={16} />
+                    </button>
+                    {postesEquipement.length > 1 && (
+                      <button onClick={() => removePosteEquipement(poste.id)} title="Supprimer ce poste" style={{ color: "#B0473E" }} className="p-1.5">
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
+                }
+              >
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Nom du poste</label>
+                    <TextField value={poste.nom} onChange={(v) => updatePosteEquipement(poste.id, { nom: v })} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Journée</label>
+                    <Select
+                      value={poste.typeJournee}
+                      onChange={(v) => updatePosteEquipement(poste.id, { typeJournee: v })}
+                      options={Object.entries(majorations).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
+                    />
+                  </div>
+                </div>
+                <TableauCatalogue poste={poste} catalogueTemps={catalogueTemps} catalogueDirect={catalogueDirect} setQtePoste={setQtePoste} setNiveauPoste={setNiveauPoste} />
+              </SectionCard>
+            ))}
+
+            <button
+              onClick={addPosteEquipement}
+              className="flex items-center justify-center gap-1.5 px-4 py-3 rounded-lg text-sm font-medium border-2 border-dashed"
+              style={{ borderColor: LINE, color: INK_2 }}
+            >
+              <Plus size={16} /> Ajouter un poste (même choix d'équipements)
             </button>
-          );
-        })}
-      </nav>
 
-      <main className="flex-1 p-4 md:p-6 max-w-6xl pb-20 md:pb-6">
-        <div className="mb-4 no-print">
-          <GlobalSearch
-            devisList={devisList} facturesList={facturesList} commandesList={commandesList}
-            clients={clients} fournisseurs={fournisseurs} settings={settings}
-            onSelectDoc={openPreview}
-            onSelectTab={setTab}
-            className="w-full sm:max-w-md"
-          />
-        </div>
+            <SectionCard
+              title={`Lignes libres (${lignesLibres.length})`}
+              subtitle="Batteries, composants, ou tout poste hors catalogue"
+              icon={ClipboardList}
+              right={
+                <div className="flex items-center gap-2">
+                  <NumberField value={nbAAjouter} onChange={(v) => setNbAAjouter(Math.max(1, Math.round(v)))} width={50} />
+                  <button
+                    onClick={() => addLigneLibre(nbAAjouter)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium"
+                    style={{ background: AMBER, color: INK }}
+                  >
+                    <Plus size={15} /> Ajouter
+                  </button>
+                </div>
+              }
+            >
+              <div className="flex flex-col gap-3">
+                {lignesLibresCalc.map(({ ligne: l, montant, detail }) => {
+                  const famille = FAMILLES_LIBRES.find((f) => f.id === l.famille);
+                  return (
+                    <div key={l.id} style={{ border: `1px solid ${LINE}`, borderRadius: 8 }} className="p-4">
+                      <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+                        <div className="md:col-span-2">
+                          <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Type</label>
+                          <Select value={l.famille} onChange={(v) => updateLigneLibre(l.id, { famille: v })} options={FAMILLES_LIBRES.map((f) => ({ value: f.id, label: f.label }))} />
+                        </div>
 
-        <div className="hidden md:flex items-center justify-between mb-5 no-print">
-          <h1 className="text-lg font-bold text-slate-900">
-            {NAV.find((n) => n.key === tab)?.label}
-          </h1>
-        </div>
+                        {famille.type === "coef" && (
+                          <div className="md:col-span-3">
+                            <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>{catalogueCoef[l.famille].critereLabel}</label>
+                            <NumberField value={l.prixAchatUnitaire} onChange={(v) => updateLigneLibre(l.id, { prixAchatUnitaire: v })} width="100%" />
+                          </div>
+                        )}
 
-        {saveError && (
-          <div className="flex items-center justify-between gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3 mb-4 no-print">
-            <span className="flex items-center gap-2"><AlertTriangle size={15} /> {saveError}</span>
-            <button onClick={() => setSaveError("")}><X size={14} /></button>
-          </div>
+                        {famille.type === "manuel" && (
+                          <div className="md:col-span-3">
+                            <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Libellé</label>
+                            <TextField value={l.libelleManuel} onChange={(v) => updateLigneLibre(l.id, { libelleManuel: v })} placeholder="Description du poste" />
+                          </div>
+                        )}
+
+                        <div className="md:col-span-1">
+                          <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Qté</label>
+                          <NumberField value={l.quantite} onChange={(v) => updateLigneLibre(l.id, { quantite: v })} width="100%" />
+                        </div>
+
+                        {famille.type === "manuel" && (
+                          <div className="md:col-span-1">
+                            <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>j/u</label>
+                            <NumberField value={l.joursManuel} onChange={(v) => updateLigneLibre(l.id, { joursManuel: v })} width="100%" />
+                          </div>
+                        )}
+
+                        {famille.type === "manuel" && (
+                          <>
+                            <div className="md:col-span-2">
+                              <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Technicien (préremplit le prix)</label>
+                              <Select
+                                value={l.niveauTechnicien}
+                                onChange={(v) => updateLigneLibre(l.id, { niveauTechnicien: v, prixJour: tarifs[v].jour })}
+                                options={Object.entries(tarifs).map(([k, v]) => ({ value: k, label: v.label }))}
+                              />
+                            </div>
+                            <div className="md:col-span-1">
+                              <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Prix / jour</label>
+                              <NumberField value={l.prixJour} onChange={(v) => updateLigneLibre(l.id, { prixJour: v })} suffix="€" width="100%" />
+                            </div>
+                            <div className="md:col-span-1">
+                              <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Journée</label>
+                              <Select value={l.typeJournee} onChange={(v) => updateLigneLibre(l.id, { typeJournee: v })} options={Object.entries(majorations).map(([k, v]) => ({ value: k, label: v.label }))} />
+                            </div>
+                          </>
+                        )}
+
+                        <div className="md:col-span-1 flex justify-end">
+                          <button onClick={() => removeLigneLibre(l.id)} style={{ color: "#B0473E" }}>
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between mt-3 pt-3" style={{ borderTop: `1px dashed ${LINE}` }}>
+                        <span style={{ fontSize: 12, color: MUTED }}>{detail}</span>
+                        <span style={{ fontSize: 15, fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(montant)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+                {lignesLibres.length === 0 && (
+                  <div style={{ color: MUTED, fontSize: 13 }} className="text-center py-4">
+                    Aucune ligne libre. Utile pour les batteries, composants ou prestations hors catalogue.
+                  </div>
+                )}
+              </div>
+            </SectionCard>
+          </>
         )}
 
-        {tab === "accueil" && (
-          <DashboardTab devisList={devisList} facturesList={facturesList} commandesList={commandesList} clients={clients} settings={settings} setTab={setTab} openPreview={openPreview} />
+        {/* ---------------- ONGLET RECAP ---------------- */}
+        {tab === "recap" && (
+          <>
+            <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="p-4 flex flex-wrap items-center gap-3 justify-between">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span style={{ fontSize: 11, color: MUTED }}>Affaire</span>
+                <Select
+                  value={currentDevisId || ""}
+                  onChange={(id) => chargerDevis(id)}
+                  options={devisList.map((d) => ({ value: d.id, label: `${d.reference || "Sans référence"}${d.client ? " — " + d.client : ""}` }))}
+                  style={{ minWidth: 240, width: "auto" }}
+                />
+              </div>
+              <button onClick={exportWord} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                <Download size={15} /> Exporter en Word
+              </button>
+            </div>
+
+            <SectionCard title="Résumé de l'affaire" icon={FileText}>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
+                <div>
+                  <div style={{ fontSize: 11, color: MUTED }}>Référence</div>
+                  <div style={{ fontWeight: 600, color: INK }}>{affaire.reference || "—"}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: MUTED }}>Client</div>
+                  <div style={{ fontWeight: 600, color: INK }}>{affaire.client || "—"}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: MUTED }}>Site</div>
+                  <div style={{ fontWeight: 600, color: INK }}>{affaire.site || "—"}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: MUTED }}>Types d'équipements</div>
+                  <div style={{ fontWeight: 600, color: INK }}>{nbEquipementsSaisis}</div>
+                </div>
+              </div>
+            </SectionCard>
+
+            {postesEquipement.map((poste) => {
+              const lignesPoste = lignesCatalogue.filter((l) => l.posteId === poste.id);
+              const totalPoste = lignesPoste.reduce((s, l) => s + l.montant, 0);
+              if (lignesPoste.length === 0) return null;
+              return (
+                <SectionCard key={poste.id} title={poste.nom} subtitle={`${lignesPoste.length} équipement${lignesPoste.length > 1 ? "s" : ""}`} icon={ClipboardList}>
+                  <div className="overflow-x-auto">
+                    <table className="w-full" style={{ fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ color: MUTED, textAlign: "left" }}>
+                          <th className="pb-2 font-medium">Équipement</th>
+                          <th className="pb-2 font-medium text-right">Qté</th>
+                          <th className="pb-2 font-medium text-right">Montant HT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {lignesPoste.map((l) => (
+                          <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
+                            <td className="py-1.5" style={{ color: INK }}>
+                              {l.label} <span style={{ color: MUTED, fontSize: 11.5 }}>({LABEL_FAMILLE[l.famille]})</span>
+                            </td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {l.qte}
+                            </td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                              {euros(l.montant)}
+                            </td>
+                          </tr>
+                        ))}
+                        <tr style={{ borderTop: `2px solid ${INK}` }}>
+                          <td className="pt-2" style={{ fontWeight: 700, color: INK }} colSpan={2}>
+                            Sous-total {poste.nom}
+                          </td>
+                          <td className="pt-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>
+                            {euros(totalPoste)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </SectionCard>
+              );
+            })}
+
+            <SectionCard title="Lignes libres" subtitle="Batteries, composants, postes manuels — non rattachés à un poste d'équipements" icon={ClipboardList}>
+              <div className="overflow-x-auto">
+                <table className="w-full" style={{ fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ color: MUTED, textAlign: "left" }}>
+                      <th className="pb-2 font-medium">Désignation</th>
+                      <th className="pb-2 font-medium text-right">Qté</th>
+                      <th className="pb-2 font-medium text-right">Montant HT</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lignesLibresCalc.map(({ ligne: l, montant }) => (
+                      <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
+                        <td className="py-1.5" style={{ color: INK }}>
+                          {l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]}
+                        </td>
+                        <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                          {l.quantite}
+                        </td>
+                        <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                          {euros(montant)}
+                        </td>
+                      </tr>
+                    ))}
+                    {lignesLibresCalc.length === 0 && (
+                      <tr>
+                        <td colSpan={3} className="py-4 text-center" style={{ color: MUTED }}>
+                          Aucune ligne libre.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </SectionCard>
+
+            <SectionCard title="Répartition par famille" icon={ClipboardList}>
+              <div className="overflow-x-auto">
+                <table className="w-full" style={{ fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ color: MUTED, textAlign: "left" }}>
+                      <th className="pb-2 font-medium">Famille</th>
+                      <th className="pb-2 font-medium text-right">Montant HT</th>
+                      <th className="pb-2 font-medium text-right">Part</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(parFamille).map(([key, montant]) => (
+                      <tr key={key} style={{ borderTop: `1px solid ${LINE}` }}>
+                        <td className="py-2" style={{ color: INK }}>
+                          {LABEL_FAMILLE[key] || key}
+                        </td>
+                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                          {euros(montant)}
+                        </td>
+                        <td className="py-2 text-right" style={{ color: MUTED }}>
+                          {totalAvantCoef > 0 ? Math.round((montant / totalAvantCoef) * 100) : 0}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+              </table>
+              </div>
+            </SectionCard>
+
+            <SectionCard title="Récapitulatif financier" icon={FileText}>
+              <div className="overflow-x-auto">
+              <table className="w-full" style={{ fontSize: 13.5 }}>
+                <tbody>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: MUTED }}>Nombre total d'équipements</td>
+                    <td className="py-2 text-right" style={{ fontWeight: 500, color: INK, fontVariantNumeric: "tabular-nums" }}>{totalEquipements}</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: MUTED }}>Total jours-hommes</td>
+                    <td className="py-2 text-right" style={{ fontWeight: 500, color: INK, fontVariantNumeric: "tabular-nums" }}>{totalJoursHomme.toFixed(2)} j</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: INK }}>Montant HT avant coefficients</td>
+                    <td className="py-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalAvantCoef)}</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: INK }}>
+                      {affaire.degressiviteActive ? `Dégressivité volume (${palierDegressif.label}, ×${palierDegressif.coef})` : "Dégressivité volume (désactivée)"}
+                    </td>
+                    <td className="py-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalApresDegressivite)}</td>
+                  </tr>
+                  <tr style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td className="py-2" style={{ color: INK }}>Coefficient contractuel — {coefContratActif.label} (×{coefContratActif.coef})</td>
+                    <td className="py-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalFinal)}</td>
+                  </tr>
+                  <tr style={{ borderTop: `2px solid ${INK}` }}>
+                    <td className="pt-3" style={{ fontWeight: 700, color: INK, fontSize: 16 }}>TOTAL HT OFFRE</td>
+                    <td className="pt-3 text-right" style={{ fontWeight: 800, color: INK, fontSize: 24, fontVariantNumeric: "tabular-nums" }}>{euros(totalFinal)}</td>
+                  </tr>
+                </tbody>
+              </table>
+              </div>
+            </SectionCard>
+          </>
         )}
-        {tab === "devis" && (
-          <DevisTab
-            devisList={devisList} saveDevisList={saveDevisList}
-            clients={clients} catalog={catalog} settings={settings}
-            facturesList={facturesList} saveFacturesList={saveFacturesList}
-            openPreview={openPreview}
-          />
-        )}
-        {tab === "factures" && (
-          <FacturesTab
-            facturesList={facturesList} saveFacturesList={saveFacturesList}
-            clients={clients} catalog={catalog} settings={settings}
-            openPreview={openPreview}
-          />
-        )}
-        {tab === "achats" && (
-          <CommandesTab
-            commandesList={commandesList} saveCommandesList={saveCommandesList}
-            fournisseurs={fournisseurs} clients={clients} settings={settings}
-            openPreview={openPreview}
-          />
-        )}
-        {tab === "clients" && (
-          <ClientsTab
-            clients={clients} saveClients={saveClients}
-            devisList={devisList} facturesList={facturesList} commandesList={commandesList}
-            settings={settings} openPreview={openPreview}
-          />
-        )}
-        {tab === "fournisseurs" && <FournisseursTab fournisseurs={fournisseurs} saveFournisseurs={saveFournisseurs} />}
-        {tab === "catalogue" && <CatalogTab catalog={catalog} saveCatalog={saveCatalog} />}
-        {tab === "cgv" && <CGVTab cgv={cgv} saveCgv={saveCgv} settings={settings} />}
+
+        {/* ---------------- ONGLET PARAMETRES ---------------- */}
         {tab === "parametres" && (
-          <SettingsTab
-            settings={settings} saveSettings={saveSettings}
-            onExportBackup={exportBackup} onImportBackup={importBackup}
-            backupCounts={{
-              clients: clients.length, devis: devisList.length, factures: facturesList.length,
-              commandes: commandesList.length, fournisseurs: fournisseurs.length, catalog: catalog.length,
-            }}
-          />
-        )}
-      </main>
+          <>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <span style={{ fontSize: 12, color: MUTED }}>Vos modifications sont enregistrées automatiquement dans ce navigateur.</span>
+              <div className="flex items-center gap-3">
+                <button onClick={enregistrerParametresMaintenant} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                  Enregistrer les valeurs
+                </button>
+                <button onClick={reinitialiserParametres} className="text-sm underline" style={{ color: "#B0473E" }}>
+                  Réinitialiser les valeurs par défaut
+                </button>
+              </div>
+            </div>
 
-      {preview && (
-        <PrintableDoc
-          type={preview.type}
-          doc={preview.doc}
-          client={previewClient}
-          chantier={previewChantier}
-          settings={settings}
-          cgv={cgv}
-          onClose={() => setPreview(null)}
-        />
-      )}
+            <SectionCard title="Prix jour technicien" icon={Settings2}>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {Object.entries(tarifs).map(([key, t]) => (
+                  <div key={key} style={{ border: `1px solid ${LINE}`, borderRadius: 8 }} className="p-4">
+                    <div style={{ fontWeight: 600, color: INK, marginBottom: 10 }}>{t.label}</div>
+                    <div className="flex flex-col gap-2">
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Prix / jour</label>
+                      <NumberField value={t.jour} onChange={(v) => setTarifs((s) => ({ ...s, [key]: { ...s[key], jour: v } }))} suffix="€" width="100%" />
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Prix / demi-journée (jour ÷ 2 × 1,2)</label>
+                      <div style={{ fontSize: 13, color: INK, fontWeight: 600, padding: "5px 0" }}>{euros((t.jour / 2) * 1.2)}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 flex items-center gap-2">
+                <label style={{ fontSize: 12, color: MUTED }}>Heures travaillées par jour</label>
+                <NumberField value={heuresJour} onChange={setHeuresJour} suffix="h" />
+                <span style={{ fontSize: 11.5, color: MUTED }}>
+                  (avec les valeurs par défaut : {euros(tarifs.expert.jour / heuresJour)}/h — cohérent avec le fichier source)
+                </span>
+              </div>
+            </SectionCard>
+
+            <SectionCard title="Coefficients de majoration (jour d'intervention)" icon={Settings2}>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {Object.entries(majorations).map(([key, m]) => (
+                  <div key={key}>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>{m.label}</label>
+                    <NumberField value={m.coef} onChange={(v) => setMajorations((s) => ({ ...s, [key]: { ...s[key], coef: v } }))} suffix="×" width="100%" />
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <SectionCard title="Dégressivité selon le volume d'équipements" icon={Settings2}>
+              <div className="flex flex-col gap-2">
+                {degressivite.map((d, i) => (
+                  <div key={i} className="grid grid-cols-3 gap-3 items-center">
+                    <span style={{ fontSize: 13, color: INK }}>{d.label}</span>
+                    <NumberField value={d.coef} onChange={(v) => setDegressivite((arr) => arr.map((x, j) => (j === i ? { ...x, coef: v } : x)))} suffix="×" />
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <SectionCard title="Coefficients contractuels" icon={Settings2}>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {Object.entries(coefContrat).map(([key, c]) => (
+                  <div key={key} className="flex items-center justify-between gap-3">
+                    <span style={{ fontSize: 13, color: INK }}>{c.label}</span>
+                    <NumberField value={c.coef} onChange={(v) => setCoefContrat((s) => ({ ...s, [key]: { ...s[key], coef: v } }))} suffix="×" />
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <SectionCard
+              title="Catalogue équipements — temps par niveau de prestation"
+              subtitle="Niveau 1-2 = temps simple + préparation, Niveau 3-4 = temps complexe + préparation, Niveau 1-4 = tout. Prix de revient = (heures du niveau ÷ heures/jour) × tarif jour + amortissement"
+              icon={ClipboardList}
+            >
+              <div className="flex flex-col gap-6">
+                {Object.entries(catalogueTemps).map(([key, cat]) => (
+                  <div key={key}>
+                    <div style={{ fontWeight: 600, color: INK, fontSize: 13 }}>{cat.label}</div>
+                    {cat.marquesRef && <div style={{ fontSize: 11.5, color: MUTED, marginBottom: 8 }}>{cat.marquesRef}</div>}
+                    <div className="flex flex-col gap-3 mt-2">
+                      {cat.items.map((item, i) => {
+                        const heuresDefaut = heuresPourNiveau(item, item.niveauDefaut || "complet");
+                        const prixRevient = (heuresDefaut / heuresJour) * tarifs.expert.jour + item.amort;
+                        const majItem = (patch) =>
+                          setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, ...patch } : it)) } }));
+                        return (
+                          <div key={item.id} style={{ border: `1px solid ${LINE}`, borderRadius: 8 }} className="p-3">
+                            <div style={{ fontSize: 13.5, fontWeight: 600, color: INK, marginBottom: 10 }}>{item.label}</div>
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Simple (1-2)</label>
+                                <NumberField value={item.heuresSimple} onChange={(v) => majItem({ heuresSimple: v })} suffix="h" width="100%" />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Complexe (3-4)</label>
+                                <NumberField value={item.heuresComplexe} onChange={(v) => majItem({ heuresComplexe: v })} suffix="h" width="100%" />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Préparation</label>
+                                <NumberField value={item.heuresPrepa} onChange={(v) => majItem({ heuresPrepa: v })} suffix="h" width="100%" />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Amortissement</label>
+                                <NumberField value={item.amort} onChange={(v) => majItem({ amort: v })} suffix="€" width="100%" />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Niveau par défaut</label>
+                                <Select
+                                  value={item.niveauDefaut || "complet"}
+                                  onChange={(v) => majItem({ niveauDefaut: v })}
+                                  options={Object.entries(NIVEAUX_PRESTATION).map(([k, label]) => ({ value: k, label }))}
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Prix de revient (défaut)</label>
+                                <div style={{ fontSize: 15, fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums", padding: "5px 0" }}>{euros(prixRevient)}</div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <SectionCard title="Catalogue — batteries & composants (coefficient sur prix d'achat)" icon={ClipboardList}>
+              <div className="flex flex-col gap-5">
+                {Object.entries(catalogueCoef).map(([key, cat]) => (
+                  <div key={key}>
+                    <div style={{ fontWeight: 600, color: INK, fontSize: 13, marginBottom: 8 }}>{cat.label}</div>
+                    <div className="flex flex-col gap-1.5">
+                      {cat.categories.map((c, i) => (
+                        <div key={c.id} className="grid grid-cols-3 gap-3 items-center">
+                          <span style={{ fontSize: 13, color: INK, gridColumn: "span 2" }}>{c.label}</span>
+                          <NumberField
+                            value={c.coef}
+                            onChange={(v) => setCatalogueCoef((s) => ({ ...s, [key]: { ...s[key], categories: s[key].categories.map((x, j) => (j === i ? { ...x, coef: v } : x)) } }))}
+                            suffix="×"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <SectionCard title="Analyses d'huile & TGBT (prix directs)" icon={ClipboardList}>
+              <div className="flex flex-col gap-5">
+                {Object.entries(catalogueDirect).map(([key, cat]) => (
+                  <div key={key}>
+                    <div style={{ fontWeight: 600, color: INK, fontSize: 13, marginBottom: 8 }}>{cat.label}</div>
+                    <div className="flex flex-col gap-1.5">
+                      {cat.items.map((item, i) => (
+                        <div key={item.id} className="grid grid-cols-3 gap-3 items-center">
+                          <span style={{ fontSize: 13, color: INK, gridColumn: "span 2" }}>{item.label}</span>
+                          <NumberField
+                            value={item.prix}
+                            onChange={(v) => setCatalogueDirect((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, prix: v } : it)) } }))}
+                            suffix="€"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+          </>
+        )}
+      </div>
     </div>
   );
 }
