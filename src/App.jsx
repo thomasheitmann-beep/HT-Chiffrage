@@ -862,7 +862,26 @@ export default function ChiffrageHTMaintenance() {
             const heures = heuresPourNiveau(item, niveau);
             const joursHomme = (heures / heuresJour) * qte;
             const montantUnitaire = (heures / heuresJour) * tarif.jour * majoration.coef + item.amort;
-            out.push({ id: `${poste.id}-${item.id}`, posteId: poste.id, posteNom: poste.nom, famille: famId, label: item.label, qte, joursHomme, niveau, montant: montantUnitaire * qte });
+            // Décomposition réelle des heures par type de temps (simple / complexe /
+            // préparation), qu'importe si le niveau choisi est "1-4 complet" ou non —
+            // sert au détail par niveau dans le récapitulatif.
+            const joursSimple = (niveau === "complexe" ? 0 : item.heuresSimple / heuresJour) * qte;
+            const joursComplexe = (niveau === "simple" ? 0 : item.heuresComplexe / heuresJour) * qte;
+            const joursPrepa = (item.heuresPrepa / heuresJour) * qte;
+            out.push({
+              id: `${poste.id}-${item.id}`,
+              posteId: poste.id,
+              posteNom: poste.nom,
+              famille: famId,
+              label: item.label,
+              qte,
+              joursHomme,
+              joursSimple,
+              joursComplexe,
+              joursPrepa,
+              niveau,
+              montant: montantUnitaire * qte,
+            });
           }
         });
       });
@@ -893,11 +912,14 @@ export default function ChiffrageHTMaintenance() {
   const totalJoursHomme =
     lignesCatalogue.reduce((s, l) => s + l.joursHomme, 0) + lignesLibresCalc.reduce((s, l) => s + l.joursHomme, 0);
 
-  // Jours-hommes des équipements du catalogue, répartis par niveau de
-  // prestation (les lignes libres n'ont pas de niveau, comptées à part).
-  const joursHommeParNiveau = { simple: 0, complexe: 0, complet: 0 };
+  // Jours-hommes des équipements du catalogue, détaillés par type de temps
+  // réel (simple / complexe / préparation) — même quand le niveau choisi est
+  // "1-4 complet", on voit la part de chaque composante, pas juste un total.
+  const joursHommeParNiveau = { simple: 0, complexe: 0, prepa: 0 };
   lignesCatalogue.forEach((l) => {
-    if (l.niveau) joursHommeParNiveau[l.niveau] = (joursHommeParNiveau[l.niveau] || 0) + l.joursHomme;
+    joursHommeParNiveau.simple += l.joursSimple || 0;
+    joursHommeParNiveau.complexe += l.joursComplexe || 0;
+    joursHommeParNiveau.prepa += l.joursPrepa || 0;
   });
   const joursHommeLignesLibres = lignesLibresCalc.reduce((s, l) => s + l.joursHomme, 0);
 
@@ -1548,8 +1570,8 @@ export default function ChiffrageHTMaintenance() {
                     <td className="py-2 text-right" style={{ color: MUTED, fontSize: 12.5, fontVariantNumeric: "tabular-nums" }}>{joursHommeParNiveau.complexe.toFixed(2)} j</td>
                   </tr>
                   <tr style={{ borderBottom: `1px solid ${LINE}` }}>
-                    <td className="py-2 pl-3" style={{ color: MUTED, fontSize: 12.5 }}>— Niveau 1-4 (complet)</td>
-                    <td className="py-2 text-right" style={{ color: MUTED, fontSize: 12.5, fontVariantNumeric: "tabular-nums" }}>{joursHommeParNiveau.complet.toFixed(2)} j</td>
+                    <td className="py-2 pl-3" style={{ color: MUTED, fontSize: 12.5 }}>— Préparation</td>
+                    <td className="py-2 text-right" style={{ color: MUTED, fontSize: 12.5, fontVariantNumeric: "tabular-nums" }}>{joursHommeParNiveau.prepa.toFixed(2)} j</td>
                   </tr>
                   <tr style={{ borderBottom: `1px solid ${LINE}` }}>
                     <td className="py-2 pl-3" style={{ color: MUTED, fontSize: 12.5 }}>— Lignes libres</td>
