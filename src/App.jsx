@@ -146,6 +146,12 @@ const DEFAULT_CATALOGUE_COEF = {
     ],
     critereLabel: "Prix d'achat unitaire (€)",
   },
+  soustraitance: {
+    label: "Sous-traitance",
+    unite: "par prestation",
+    categories: [{ id: "st-unique", label: "Coefficient sous-traitance", min: 0, max: Infinity, coef: 1.4 }],
+    critereLabel: "Prix sous-traitant (€)",
+  },
 };
 
 // Catalogues à prix direct (pas de calcul heures × tarif) : analyses d'huile
@@ -206,8 +212,10 @@ const DEFAULT_CATALOGUE_DIRECT = {
 
 // Familles pour les "lignes libres" (batteries, composants, poste manuel)
 const FAMILLES_LIBRES = [
+  { id: "maindoeuvre", label: "Main-d'œuvre", type: "manuel" },
   { id: "composants", label: "Composants", type: "coef" },
-  { id: "manuel", label: "Poste libre (manuel)", type: "manuel" },
+  { id: "soustraitance", label: "Sous-traitance", type: "coef" },
+  { id: "manuel", label: "Poste libre (autre)", type: "manuel" },
 ];
 
 const LABEL_FAMILLE = {
@@ -221,6 +229,8 @@ const LABEL_FAMILLE = {
   batteries: "Batteries",
   composants: "Composants",
   onduleur: "Onduleurs",
+  maindoeuvre: "Main-d'œuvre",
+  soustraitance: "Sous-traitance",
   manuel: "Poste libre",
 };
 
@@ -253,9 +263,9 @@ function nouveauPosteEquipement(n) {
 
 // ---------------------------------------------------------------------------
 
-function SectionCard({ title, icon: Icon, children, right, subtitle }) {
+function SectionCard({ title, icon: Icon, children, right, subtitle, bg }) {
   return (
-    <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="overflow-hidden">
+    <div style={{ background: bg || "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 md:px-5 py-4" style={{ borderBottom: `1px solid ${LINE}` }}>
         <div className="flex items-center gap-2">
           {Icon && <Icon size={17} color={INK_2} />}
@@ -458,12 +468,18 @@ export default function ChiffrageHTMaintenance() {
   const [catalogueCoef, setCatalogueCoef] = useState({ ...DEFAULT_CATALOGUE_COEF, ...(saved.catalogueCoef || {}) });
   const [catalogueDirect, setCatalogueDirect] = useState(migrerCatalogueDirect(saved.catalogueDirect));
 
+  const capaciteAh = (label) => {
+    const m = String(label).match(/[\d.,]+/);
+    return m ? parseFloat(m[0].replace(",", ".")) : Infinity;
+  };
   const ajouterLigneCatalogueDirect = (familleKey) =>
     setCatalogueDirect((s) => {
-      const nouvelItem =
-        familleKey === "batteries"
-          ? { id: uid(), label: "Nouvelle capacité", prixAchat: 0, coef: 2, prix: 0 }
-          : { id: uid(), label: "Nouvel article", prix: 0 };
+      if (familleKey === "batteries") {
+        const nouvelItem = { id: uid(), label: "Nouvelle capacité", prixAchat: 0, coef: 2, prix: 0 };
+        const items = [...s.batteries.items, nouvelItem].sort((a, b) => capaciteAh(a.label) - capaciteAh(b.label));
+        return { ...s, batteries: { ...s.batteries, items } };
+      }
+      const nouvelItem = { id: uid(), label: "Nouvel article", prix: 0 };
       return { ...s, [familleKey]: { ...s[familleKey], items: [...s[familleKey].items, nouvelItem] } };
     });
   const supprimerLigneCatalogueDirect = (familleKey, itemId) =>
@@ -1210,42 +1226,45 @@ export default function ChiffrageHTMaintenance() {
               </div>
             </SectionCard>
 
-            {postesEquipement.map((poste) => (
-              <SectionCard
-                key={poste.id}
-                title={poste.nom}
-                subtitle="Renseignez une quantité pour autant de types d'équipements que nécessaire — pas de limite"
-                icon={ClipboardList}
-                right={
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => dupliquerPosteEquipement(poste.id)} title="Dupliquer ce poste" style={{ color: INK_2 }} className="p-1.5">
-                      <Copy size={16} />
-                    </button>
-                    {postesEquipement.length > 1 && (
-                      <button onClick={() => removePosteEquipement(poste.id)} title="Supprimer ce poste" style={{ color: "#B0473E" }} className="p-1.5">
-                        <Trash2 size={16} />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-start">
+              {postesEquipement.map((poste, index) => (
+                <SectionCard
+                  key={poste.id}
+                  title={poste.nom}
+                  subtitle="Renseignez une quantité pour autant de types d'équipements que nécessaire — pas de limite"
+                  icon={ClipboardList}
+                  bg={index % 2 === 1 ? "#F3F4F5" : "#fff"}
+                  right={
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => dupliquerPosteEquipement(poste.id)} title="Dupliquer ce poste" style={{ color: INK_2 }} className="p-1.5">
+                        <Copy size={16} />
                       </button>
-                    )}
+                      {postesEquipement.length > 1 && (
+                        <button onClick={() => removePosteEquipement(poste.id)} title="Supprimer ce poste" style={{ color: "#B0473E" }} className="p-1.5">
+                          <Trash2 size={16} />
+                        </button>
+                      )}
+                    </div>
+                  }
+                >
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+                    <div>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Nom du poste</label>
+                      <TextField value={poste.nom} onChange={(v) => updatePosteEquipement(poste.id, { nom: v })} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Journée</label>
+                      <Select
+                        value={poste.typeJournee}
+                        onChange={(v) => updatePosteEquipement(poste.id, { typeJournee: v })}
+                        options={Object.entries(majorations).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
+                      />
+                    </div>
                   </div>
-                }
-              >
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
-                  <div>
-                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Nom du poste</label>
-                    <TextField value={poste.nom} onChange={(v) => updatePosteEquipement(poste.id, { nom: v })} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Journée</label>
-                    <Select
-                      value={poste.typeJournee}
-                      onChange={(v) => updatePosteEquipement(poste.id, { typeJournee: v })}
-                      options={Object.entries(majorations).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
-                    />
-                  </div>
-                </div>
-                <TableauCatalogue poste={poste} catalogueTemps={catalogueTemps} catalogueDirect={catalogueDirect} setQtePoste={setQtePoste} setNiveauPoste={setNiveauPoste} />
-              </SectionCard>
-            ))}
+                  <TableauCatalogue poste={poste} catalogueTemps={catalogueTemps} catalogueDirect={catalogueDirect} setQtePoste={setQtePoste} setNiveauPoste={setNiveauPoste} />
+                </SectionCard>
+              ))}
+            </div>
 
             <button
               onClick={addPosteEquipement}
@@ -1697,7 +1716,7 @@ export default function ChiffrageHTMaintenance() {
               </div>
             </SectionCard>
 
-            <SectionCard title="Catalogue — composants (coefficient sur prix d'achat)" icon={ClipboardList}>
+            <SectionCard title="Catalogue — composants & sous-traitance (coefficient sur prix d'achat)" icon={ClipboardList}>
               <div className="flex flex-col gap-5">
                 {Object.entries(catalogueCoef).map(([key, cat]) => (
                   <div key={key}>
