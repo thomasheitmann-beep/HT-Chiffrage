@@ -47,7 +47,7 @@ const DEFAULT_DEGRESSIVITE = [
   { min: 0, max: 5, coef: 1, label: "1 à 5 équipements" },
   { min: 5, max: 10, coef: 0.98, label: "5 à 10 équipements" },
   { min: 10, max: 20, coef: 0.95, label: "10 à 20 équipements" },
-  { min: 20, max: Infinity, coef: 0.9, label: "Plus de 20 équipements" },
+  { min: 20, max: 999999, coef: 0.9, label: "Plus de 20 équipements" },
 ];
 
 const DEFAULT_COEF_CONTRAT = {
@@ -142,14 +142,14 @@ const DEFAULT_CATALOGUE_COEF = {
       { id: "cmp-a", label: "1 € à 30 €", min: 1, max: 30, coef: 3.4 },
       { id: "cmp-b", label: "30 € à 60 €", min: 30, max: 60, coef: 2.9 },
       { id: "cmp-c", label: "60 € à 150 €", min: 60, max: 150, coef: 2.4 },
-      { id: "cmp-d", label: "> 150 €", min: 150, max: Infinity, coef: 2.2 },
+      { id: "cmp-d", label: "> 150 €", min: 150, max: 999999, coef: 2.2 },
     ],
     critereLabel: "Prix d'achat unitaire (€)",
   },
   soustraitance: {
     label: "Sous-traitance",
     unite: "par prestation",
-    categories: [{ id: "st-unique", label: "Coefficient sous-traitance", min: 0, max: Infinity, coef: 1.4 }],
+    categories: [{ id: "st-unique", label: "Coefficient sous-traitance", min: 0, max: 999999, coef: 1.4 }],
     critereLabel: "Prix sous-traitant (€)",
   },
 };
@@ -254,7 +254,10 @@ function euros(n) {
 }
 
 function findCoefCategory(catalogue, valeur) {
-  return catalogue.categories.find((c) => valeur >= c.min && valeur <= c.max) || catalogue.categories[0];
+  // c.max peut valoir null si une ancienne sauvegarde a transformé Infinity
+  // en null (JSON ne sait pas encoder Infinity) — on le traite alors comme
+  // "sans limite haute" plutôt que de faire échouer la comparaison.
+  return catalogue.categories.find((c) => valeur >= c.min && valeur <= (c.max ?? Infinity)) || catalogue.categories[0];
 }
 
 function nouveauPosteEquipement(n) {
@@ -927,7 +930,7 @@ export default function ChiffrageHTMaintenance() {
     lignesCatalogue.reduce((s, l) => s + l.montant, 0) + lignesLibresCalc.reduce((s, l) => s + l.montant, 0);
 
   const palierDegressif =
-    degressivite.find((d) => totalEquipements > d.min && totalEquipements <= d.max) || degressivite[degressivite.length - 1];
+    degressivite.find((d) => totalEquipements > d.min && totalEquipements <= (d.max ?? Infinity)) || degressivite[degressivite.length - 1];
   const coefContratActif = coefContrat[affaire.contrat] || { coef: 1, label: "—" };
 
   const totalApresDegressivite = affaire.degressiviteActive ? totalAvantCoef * palierDegressif.coef : totalAvantCoef;
