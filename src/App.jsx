@@ -1,8 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy, Flame } from "lucide-react";
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
 import { doc, getDoc, setDoc, collection, getDocs, addDoc, deleteDoc } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { db, auth } from "./firebase";
@@ -1382,71 +1380,132 @@ export default function ChiffrageHTMaintenance() {
     URL.revokeObjectURL(url);
   }
 
-  // ---- Export PDF du récapitulatif FirePro ----
-  function exportFireProPdf() {
+  // ---- Export Word (.docx) du récapitulatif FirePro ----
+  async function exportFireProWord() {
     const dateStr = new Date().toLocaleDateString("fr-FR");
-    const docPdf = new jsPDF();
-    const inkRgb = [27, 39, 51];
-    const amberRgb = [232, 163, 61];
+    const noBorder = { style: "none", size: 0, color: "FFFFFF" };
+    const noBorders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder };
+    const PAGE_WIDTH = 9360;
+    const colWidths = (percents) => percents.map((p) => Math.round((PAGE_WIDTH * p) / 100));
+    const txt = (text, opts = {}) => new TextRun({ text: String(text), bold: !!opts.bold, color: opts.color });
+    const para = (text, opts = {}) => new Paragraph({ alignment: opts.right ? AlignmentType.RIGHT : AlignmentType.LEFT, children: [txt(text, opts)] });
 
-    docPdf.setFontSize(18);
-    docPdf.setTextColor(...inkRgb);
-    docPdf.text("Récapitulatif FirePro — HT Maintenance", 14, 18);
-    docPdf.setDrawColor(...amberRgb);
-    docPdf.setLineWidth(1);
-    docPdf.line(14, 21, 196, 21);
-
-    docPdf.setFontSize(10.5);
-    docPdf.setTextColor(60, 60, 60);
-    const infos = [
-      [`Référence : ${affaire.reference || "—"}`, `Date : ${dateStr}`],
-      [`Client : ${affaire.client || "—"}`, `Site : ${affaire.site || "—"}`],
-    ];
-    let y = 30;
-    infos.forEach((ligne) => {
-      docPdf.text(ligne[0], 14, y);
-      docPdf.text(ligne[1], 110, y);
-      y += 6;
+    const infoW = colWidths([30, 70]);
+    const infoTable = new Table({
+      width: { size: PAGE_WIDTH, type: WidthType.DXA },
+      columnWidths: infoW,
+      rows: [
+        ["Référence", affaire.reference || "—"],
+        ["Client", affaire.client || "—"],
+        ["Site", affaire.site || "—"],
+        ["Date", dateStr],
+      ].map(
+        ([label, value]) =>
+          new TableRow({
+            children: [
+              new TableCell({ width: { size: infoW[0], type: WidthType.DXA }, borders: noBorders, children: [para(label, { bold: true })] }),
+              new TableCell({ width: { size: infoW[1], type: WidthType.DXA }, borders: noBorders, children: [para(value)] }),
+            ],
+          })
+      ),
     });
 
-    autoTable(docPdf, {
-      startY: y + 4,
-      head: [["Local", "Classe de feu", "Volume (m³)", "Masse nécess. (g)", "Masse eff. (g)", "Montant HT"]],
-      body: zonesFireProCalc.map(({ zone, classe, volume, masseNecessaire, masseEffective, montantTotal, suffisant }) => [
-        zone.nom + (suffisant ? "" : "  (insuffisant)"),
-        classe.label,
-        volume.toFixed(2),
-        Math.round(masseNecessaire),
-        Math.round(masseEffective),
-        euros(montantTotal),
-      ]),
-      headStyles: { fillColor: inkRgb, textColor: 255 },
-      styles: { fontSize: 9 },
-      margin: { left: 14, right: 14 },
+    const detailW = colWidths([40, 40, 20]);
+    const headerCell = (text) =>
+      new TableCell({ width: { size: detailW[0], type: WidthType.DXA }, shading: { type: ShadingType.SOLID, fill: "1B2733" }, children: [para(text, { bold: true, color: "FFFFFF" })] });
+
+    const zonesChildren = [];
+    zonesFireProCalc.forEach(({ zone, classe, volume, masseNecessaire, masseEffective, montantTotal, suffisant }) => {
+      zonesChildren.push(new Paragraph({ text: `${zone.nom}${suffisant ? "" : " — masse insuffisante"}`, heading: HeadingLevel.HEADING_2, spacing: { before: 240 } }));
+      zonesChildren.push(
+        para(
+          `Classe de feu : ${classe.label} — Volume : ${volume.toFixed(2)} m³ — Masse nécessaire : ${Math.round(masseNecessaire)} g — Masse effective : ${Math.round(
+            masseEffective
+          )} g`
+        )
+      );
+
+      const lignesGen = fireproGenerateurs
+        .map((g) => ({ label: g.label, qte: zone.generateurs[g.id] || 0, prix: g.prix }))
+        .filter((l) => l.qte > 0);
+      const lignesAcc = [];
+      Object.values(fireproAccessoires).forEach((fam) => {
+        fam.items.forEach((item) => {
+          const qte = zone.accessoires[item.id] || 0;
+          if (qte > 0) lignesAcc.push({ label: item.label, qte, prix: item.prix });
+        });
+      });
+      const toutesLignes = [...lignesGen, ...lignesAcc];
+
+      const rows = [
+        new TableRow({
+          children: [headerCell("Désignation"), headerCell("Prix unitaire"), headerCell("Qté")],
+        }),
+        ...(toutesLignes.length > 0
+          ? toutesLignes.map(
+              (l) =>
+                new TableRow({
+                  children: [
+                    new TableCell({ width: { size: detailW[0], type: WidthType.DXA }, children: [para(l.label)] }),
+                    new TableCell({ width: { size: detailW[1], type: WidthType.DXA }, children: [para(euros(l.prix), { right: true })] }),
+                    new TableCell({ width: { size: detailW[2], type: WidthType.DXA }, children: [para(l.qte, { right: true })] }),
+                  ],
+                })
+            )
+          : [new TableRow({ children: [new TableCell({ columnSpan: 3, children: [para("Aucun élément sélectionné")] })] })]),
+      ];
+      zonesChildren.push(new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: detailW, rows }));
+      zonesChildren.push(
+        new Paragraph({
+          spacing: { before: 100, after: 100 },
+          alignment: AlignmentType.RIGHT,
+          children: [txt(`Sous-total ${zone.nom} : ${euros(montantTotal)}`, { bold: true })],
+        })
+      );
     });
 
-    let yFin = docPdf.lastAutoTable.finalY + 10;
-    const lignesRecap = [
-      ["Montant HT avant coefficient", euros(totalFireProAvantCoef)],
-      [`Coefficient d'ajustement (×${fireproCoefAjustement})`, euros(totalFirePro)],
-    ];
-    docPdf.setFontSize(10.5);
-    docPdf.setTextColor(...inkRgb);
-    lignesRecap.forEach(([label, val]) => {
-      docPdf.text(label, 14, yFin);
-      docPdf.text(val, 196, yFin, { align: "right" });
-      yFin += 7;
-    });
-    docPdf.setDrawColor(...inkRgb);
-    docPdf.setLineWidth(0.8);
-    docPdf.line(14, yFin, 196, yFin);
-    yFin += 8;
-    docPdf.setFontSize(14);
-    docPdf.setFont(undefined, "bold");
-    docPdf.text("TOTAL HT FIREPRO", 14, yFin);
-    docPdf.text(euros(totalFirePro), 196, yFin, { align: "right" });
+    const recapW = colWidths([70, 30]);
+    const recapRows = [
+      ["Montant HT avant coefficient", euros(totalFireProAvantCoef), false],
+      [`Coefficient d'ajustement (×${fireproCoefAjustement})`, euros(totalFirePro), false],
+      ["TOTAL HT FIREPRO", euros(totalFirePro), true],
+    ].map(
+      ([label, value, bold]) =>
+        new TableRow({
+          children: [
+            new TableCell({ width: { size: recapW[0], type: WidthType.DXA }, borders: noBorders, children: [para(label, { bold })] }),
+            new TableCell({ width: { size: recapW[1], type: WidthType.DXA }, borders: noBorders, children: [para(value, { bold, right: true })] }),
+          ],
+        })
+    );
+    const recapTable = new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: recapW, rows: recapRows });
 
-    docPdf.save(`FirePro_${(affaire.reference || "HT-Maintenance").replace(/[^a-zA-Z0-9_-]/g, "_")}.pdf`);
+    const docWord = new Document({
+      sections: [
+        {
+          children: [
+            new Paragraph({ text: "Récapitulatif FirePro — HT Maintenance", heading: HeadingLevel.HEADING_1 }),
+            infoTable,
+            new Paragraph({ text: "", spacing: { after: 100 } }),
+            new Paragraph({ text: "Détail par local", heading: HeadingLevel.HEADING_2, spacing: { before: 100 } }),
+            ...zonesChildren,
+            new Paragraph({ text: "", spacing: { after: 100 } }),
+            new Paragraph({ text: "Récapitulatif financier", heading: HeadingLevel.HEADING_2, spacing: { before: 100 } }),
+            recapTable,
+          ],
+        },
+      ],
+    });
+
+    const blob = await Packer.toBlob(docWord);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `FirePro_${(affaire.reference || "HT-Maintenance").replace(/[^a-zA-Z0-9_-]/g, "_")}.docx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   const tabBtn = (id, label, Icon) => (
@@ -2143,12 +2202,59 @@ export default function ChiffrageHTMaintenance() {
               <Plus size={16} /> Ajouter un local
             </button>
 
+            {zonesFireProCalc.map(({ zone, montantTotal }) => {
+              const lignesGen = fireproGenerateurs.map((g) => ({ id: g.id, label: g.label, qte: zone.generateurs[g.id] || 0, prix: g.prix })).filter((l) => l.qte > 0);
+              const lignesAcc = [];
+              Object.entries(fireproAccessoires).forEach(([famId, fam]) => {
+                fam.items.forEach((item) => {
+                  const qte = zone.accessoires[item.id] || 0;
+                  if (qte > 0) lignesAcc.push({ id: `${famId}-${item.id}`, label: item.label, qte, prix: item.prix });
+                });
+              });
+              const toutesLignes = [...lignesGen, ...lignesAcc];
+              return (
+                <SectionCard key={zone.id} title={zone.nom} subtitle={`${toutesLignes.length} élément${toutesLignes.length > 1 ? "s" : ""} sélectionné${toutesLignes.length > 1 ? "s" : ""}`} icon={Flame}>
+                  <div className="overflow-x-auto">
+                    <table className="w-full" style={{ fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ color: MUTED, textAlign: "left" }}>
+                          <th className="pb-2 font-medium">Désignation</th>
+                          <th className="pb-2 font-medium text-right">Prix unitaire</th>
+                          <th className="pb-2 font-medium text-right">Qté</th>
+                          <th className="pb-2 font-medium text-right">Montant HT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {toutesLignes.map((l) => (
+                          <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
+                            <td className="py-1.5" style={{ color: INK }}>{l.label}</td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{euros(l.prix)}</td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{l.qte}</td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{euros(l.prix * l.qte)}</td>
+                          </tr>
+                        ))}
+                        {toutesLignes.length === 0 && (
+                          <tr>
+                            <td colSpan={4} className="py-4 text-center" style={{ color: MUTED }}>Aucun élément sélectionné.</td>
+                          </tr>
+                        )}
+                        <tr style={{ borderTop: `2px solid ${INK}` }}>
+                          <td className="pt-2" style={{ fontWeight: 700, color: INK }} colSpan={3}>Sous-total {zone.nom}</td>
+                          <td className="pt-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(montantTotal)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </SectionCard>
+              );
+            })}
+
             <SectionCard
               title="Récapitulatif FirePro"
               icon={FileText}
               right={
-                <button onClick={exportFireProPdf} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
-                  <Download size={15} /> Exporter en PDF
+                <button onClick={exportFireProWord} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                  <Download size={15} /> Exporter en Word
                 </button>
               }
             >
