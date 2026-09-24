@@ -663,7 +663,6 @@ export default function ChiffrageHTMaintenance() {
   const [majorations, setMajorations] = useState(saved.majorations || DEFAULT_MAJORATIONS);
   const [degressivite, setDegressivite] = useState(saved.degressivite || DEFAULT_DEGRESSIVITE);
   const [coefContrat, setCoefContrat] = useState(saved.coefContrat || DEFAULT_COEF_CONTRAT);
-  const [heuresJour, setHeuresJour] = useState(saved.heuresJour ?? 7);
 
   const [catalogueTemps, setCatalogueTemps] = useState(catalogueTempsValide(saved.catalogueTemps) ? saved.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
   const [catalogueCoef, setCatalogueCoef] = useState({ ...DEFAULT_CATALOGUE_COEF, ...(saved.catalogueCoef || {}) });
@@ -715,6 +714,7 @@ export default function ChiffrageHTMaintenance() {
         reference: "DEV-" + new Date().getFullYear() + "-001",
         contrat: "aucun",
         degressiviteActive: true,
+        heuresJour: 7,
       },
       postesEquipement: [nouveauPosteEquipement(1)],
       lignesLibres: [],
@@ -852,7 +852,6 @@ export default function ChiffrageHTMaintenance() {
           if (data.majorations) setMajorations(data.majorations);
           if (data.degressivite) setDegressivite(data.degressivite);
           if (data.coefContrat) setCoefContrat(data.coefContrat);
-          if (data.heuresJour != null) setHeuresJour(data.heuresJour);
           setCatalogueTemps(catalogueTempsValide(data.catalogueTemps) ? data.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
           setCatalogueCoef({ ...DEFAULT_CATALOGUE_COEF, ...(data.catalogueCoef || {}) });
           setCatalogueDirect(migrerCatalogueDirect(data.catalogueDirect));
@@ -1060,7 +1059,6 @@ export default function ChiffrageHTMaintenance() {
       majorations,
       degressivite,
       coefContrat,
-      heuresJour,
       catalogueTemps,
       catalogueCoef,
       catalogueDirect,
@@ -1081,7 +1079,6 @@ export default function ChiffrageHTMaintenance() {
     majorations,
     degressivite,
     coefContrat,
-    heuresJour,
     catalogueTemps,
     catalogueCoef,
     catalogueDirect,
@@ -1136,7 +1133,6 @@ export default function ChiffrageHTMaintenance() {
           majorations,
           degressivite,
           coefContrat,
-          heuresJour,
           catalogueTemps,
           catalogueCoef,
           catalogueDirect,
@@ -1164,7 +1160,6 @@ export default function ChiffrageHTMaintenance() {
     majorations,
     degressivite,
     coefContrat,
-    heuresJour,
     catalogueTemps,
     catalogueCoef,
     catalogueDirect,
@@ -1188,7 +1183,7 @@ export default function ChiffrageHTMaintenance() {
   // délai automatique (utile pour une confirmation explicite à l'utilisateur).
   const enregistrerParametresMaintenant = () => {
     setSyncState("syncing");
-    setDoc(doc(db, FIRESTORE_DOC), { tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect })
+    setDoc(doc(db, FIRESTORE_DOC), { tarifs, majorations, degressivite, coefContrat, catalogueTemps, catalogueCoef, catalogueDirect })
       .then(() => setSyncState("synced"))
       .catch(() => setSyncState("error"));
   };
@@ -1206,7 +1201,6 @@ export default function ChiffrageHTMaintenance() {
           if (data.majorations) setMajorations(data.majorations);
           if (data.degressivite) setDegressivite(data.degressivite);
           if (data.coefContrat) setCoefContrat(data.coefContrat);
-          if (data.heuresJour != null) setHeuresJour(data.heuresJour);
           setCatalogueTemps(catalogueTempsValide(data.catalogueTemps) ? data.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
           setCatalogueCoef({ ...DEFAULT_CATALOGUE_COEF, ...(data.catalogueCoef || {}) });
           setCatalogueDirect(migrerCatalogueDirect(data.catalogueDirect));
@@ -1226,7 +1220,6 @@ export default function ChiffrageHTMaintenance() {
     setMajorations(DEFAULT_MAJORATIONS);
     setDegressivite(DEFAULT_DEGRESSIVITE);
     setCoefContrat(DEFAULT_COEF_CONTRAT);
-    setHeuresJour(7);
     setCatalogueTemps(DEFAULT_CATALOGUE_TEMPS);
     setCatalogueCoef(DEFAULT_CATALOGUE_COEF);
     setCatalogueDirect(DEFAULT_CATALOGUE_DIRECT);
@@ -1294,6 +1287,7 @@ export default function ChiffrageHTMaintenance() {
 
   // ---- Lignes issues des postes d'équipements (quantité > 0 uniquement) ----
   const lignesCatalogue = useMemo(() => {
+    const heuresJourActif = affaire.heuresJour || 7; // repli pour les devis enregistrés avant ce réglage
     const out = [];
     postesEquipement.forEach((poste) => {
       const majoration = majorations[poste.typeJournee];
@@ -1304,14 +1298,14 @@ export default function ChiffrageHTMaintenance() {
             const tarif = tarifs.expert;
             const niveau = (poste.niveaux && poste.niveaux[item.id]) || item.niveauDefaut || "complet";
             const heures = heuresPourNiveau(item, niveau);
-            const joursHomme = (heures / heuresJour) * qte;
-            const montantUnitaire = (heures / heuresJour) * tarif.jour * majoration.coef + item.amort;
+            const joursHomme = (heures / heuresJourActif) * qte;
+            const montantUnitaire = (heures / heuresJourActif) * tarif.jour * majoration.coef + item.amort;
             // Décomposition réelle des heures par type de temps (simple / complexe /
             // préparation), qu'importe si le niveau choisi est "1-4 complet" ou non —
             // sert au détail par niveau dans le récapitulatif.
-            const joursSimple = (niveau === "complexe" ? 0 : item.heuresSimple / heuresJour) * qte;
-            const joursComplexe = (niveau === "simple" ? 0 : item.heuresComplexe / heuresJour) * qte;
-            const joursPrepa = (item.heuresPrepa / heuresJour) * qte;
+            const joursSimple = (niveau === "complexe" ? 0 : item.heuresSimple / heuresJourActif) * qte;
+            const joursComplexe = (niveau === "simple" ? 0 : item.heuresComplexe / heuresJourActif) * qte;
+            const joursPrepa = (item.heuresPrepa / heuresJourActif) * qte;
             out.push({
               id: `${poste.id}-${item.id}`,
               posteId: poste.id,
@@ -1339,7 +1333,7 @@ export default function ChiffrageHTMaintenance() {
       });
     });
     return out;
-  }, [postesEquipement, catalogueTemps, catalogueDirect, tarifs, majorations, heuresJour]);
+  }, [postesEquipement, catalogueTemps, catalogueDirect, tarifs, majorations, affaire.heuresJour]);
 
   const lignesLibresCalc = useMemo(() => lignesLibres.map((l) => ({ ligne: l, ...computeLigneLibre(l) })), [
     lignesLibres,
@@ -1808,7 +1802,7 @@ export default function ChiffrageHTMaintenance() {
                   <TextField value={affaire.site} onChange={(v) => setAffaire((a) => ({ ...a, site: v }))} placeholder="Site / adresse" />
                 </div>
               </div>
-              <div className="flex items-end gap-6">
+              <div className="flex items-end gap-6 flex-wrap">
                 <div>
                   <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Cadre contractuel</label>
                   <Select
@@ -1817,6 +1811,10 @@ export default function ChiffrageHTMaintenance() {
                     options={Object.entries(coefContrat).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
                     style={{ maxWidth: 320 }}
                   />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Heures travaillées / jour</label>
+                  <NumberField value={affaire.heuresJour || 7} onChange={(v) => setAffaire((a) => ({ ...a, heuresJour: v }))} suffix="h" />
                 </div>
                 <label className="flex items-center gap-2 pb-2" style={{ fontSize: 13, color: INK, cursor: "pointer" }}>
                   <input
@@ -2531,12 +2529,8 @@ export default function ChiffrageHTMaintenance() {
                   </div>
                 ))}
               </div>
-              <div className="mt-4 flex items-center gap-2">
-                <label style={{ fontSize: 12, color: MUTED }}>Heures travaillées par jour</label>
-                <NumberField value={heuresJour} onChange={setHeuresJour} suffix="h" />
-                <span style={{ fontSize: 11.5, color: MUTED }}>
-                  (avec les valeurs par défaut : {euros(tarifs.expert.jour / heuresJour)}/h — cohérent avec le fichier source)
-                </span>
+              <div className="mt-4" style={{ fontSize: 11.5, color: MUTED }}>
+                Les heures travaillées par jour se règlent désormais par devis (onglet Chiffrage → Informations de l'affaire), puisqu'elles peuvent différer d'un chiffrage à l'autre.
               </div>
             </SectionCard>
 
@@ -2586,7 +2580,7 @@ export default function ChiffrageHTMaintenance() {
                     <div className="flex flex-col gap-3 mt-2">
                       {cat.items.map((item, i) => {
                         const heuresDefaut = heuresPourNiveau(item, item.niveauDefaut || "complet");
-                        const prixRevient = (heuresDefaut / heuresJour) * tarifs.expert.jour + item.amort;
+                        const prixRevient = (heuresDefaut / (affaire.heuresJour || 7)) * tarifs.expert.jour + item.amort;
                         const majItem = (patch) =>
                           setCatalogueTemps((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, ...patch } : it)) } }));
                         return (
