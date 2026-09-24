@@ -2171,7 +2171,16 @@ export default function ChiffrageHTMaintenance() {
               </div>
             </SectionCard>
 
-            <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="p-4 mt-2 flex flex-wrap items-center gap-3 justify-between">
+            <div className="flex items-center gap-3 mt-4 mb-1">
+              <div style={{ flex: 1, height: 2, background: "linear-gradient(to right, transparent, #E0684A)" }} />
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: "#FBEAE5" }}>
+                <Flame size={15} color="#C6472E" strokeWidth={2.5} />
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#C6472E", letterSpacing: 0.3 }}>FIREPRO</span>
+              </div>
+              <div style={{ flex: 1, height: 2, background: "linear-gradient(to left, transparent, #E0684A)" }} />
+            </div>
+
+            <div style={{ background: "#FFFBF7", border: `1px solid #F0DCCF`, borderRadius: 10 }} className="p-4 mt-2 flex flex-wrap items-center gap-3 justify-between">
               <div className="flex items-center gap-2 flex-wrap">
                 <span style={{ fontSize: 11, color: MUTED }}>Devis FirePro</span>
                 <Select
@@ -2197,7 +2206,13 @@ export default function ChiffrageHTMaintenance() {
               });
               const toutesLignes = [...lignesGen, ...lignesAcc];
               return (
-                <SectionCard key={zone.id} title={zone.nom} subtitle={`${toutesLignes.length} élément${toutesLignes.length > 1 ? "s" : ""} sélectionné${toutesLignes.length > 1 ? "s" : ""}`} icon={Flame}>
+                <SectionCard
+                  key={zone.id}
+                  title={zone.nom}
+                  subtitle={`${toutesLignes.length} élément${toutesLignes.length > 1 ? "s" : ""} sélectionné${toutesLignes.length > 1 ? "s" : ""}`}
+                  icon={Flame}
+                  bg="#FFFBF7"
+                >
                   <div className="overflow-x-auto">
                     <table className="w-full" style={{ fontSize: 13 }}>
                       <thead>
@@ -2233,7 +2248,7 @@ export default function ChiffrageHTMaintenance() {
               );
             })}
 
-            <SectionCard title="Récapitulatif FirePro" icon={FileText}>
+            <SectionCard title="Récapitulatif FirePro" icon={FileText} bg="#FFFBF7">
               <div className="overflow-x-auto">
                 <table className="w-full" style={{ fontSize: 13 }}>
                   <thead>
