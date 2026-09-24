@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy } from "lucide-react";
+import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy, Flame } from "lucide-react";
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
 import { doc, getDoc, setDoc, collection, getDocs, addDoc, deleteDoc } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
@@ -209,6 +209,191 @@ const DEFAULT_CATALOGUE_DIRECT = {
     ],
   },
 };
+
+// ---------------------------------------------------------------------------
+// FIREPRO — extinction par aérosol (norme EN 15276-1/2:2019), repris du
+// fichier QUO-CHIFFRAGE FIREPRO. Masse nécessaire (g) = Volume (m3) × DAD
+// (g/m3, densité d'application selon la classe de feu) × coefficient de
+// remplissage × coefficient de confinement.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_FIREPRO_CLASSES = [
+  { id: "a-pvc", label: "Classe A - PVC", dad: 59.8 },
+  { id: "a-bois", label: "Classe A - Bois", dad: 96.2 },
+  { id: "b-liquide", label: "Classe B - Liquide", dad: 67.6 },
+  { id: "c-gaz", label: "Classe C - Gaz", dad: 39 },
+  { id: "f-huiles", label: "Classe F - Huiles", dad: 98.8 },
+];
+
+const DEFAULT_FIREPRO_CONFINEMENT = {
+  bon: { label: "Bon", coef: 1 },
+  standard: { label: "Standard", coef: 1.15 },
+  mauvais: { label: "Mauvais", coef: 1.4 },
+};
+
+// Masse = grammes d'aérosol délivrés par le générateur. Prix HT fournisseur.
+const DEFAULT_FIREPRO_GENERATEURS = [
+  { id: "fp-20t", code: "10620", label: "FP-20T", masse: 12, prix: 105.6 },
+  { id: "fp-20th", code: "10649", label: "FP-20TH", masse: 12, prix: 96.8 },
+  { id: "fp-40t", code: "10609", label: "FP-40T", masse: 24.4, prix: 193.8 },
+  { id: "fp-80t", code: "10617", label: "FP-80T", masse: 47.2, prix: 283.1 },
+  { id: "fp-100s", code: "10140", label: "FP-100S", masse: 61, prix: 421.8 },
+  { id: "fp-200s", code: "10142", label: "FP-200S", masse: 118, prix: 488.3 },
+  { id: "fp-500s", code: "10145", label: "FP-500S", masse: 330, prix: 678.6 },
+  { id: "fp-1200ts", code: "10622", label: "FP-1200TS", masse: 756, prix: 1359 },
+  { id: "fp-2000ts", code: "10623", label: "FP-2000TS", masse: 1200, prix: 1569.6 },
+  { id: "fp-3000ts", code: "10624", label: "FP-3000TS", masse: 1830, prix: 1825.2 },
+  { id: "fp-4200ts", code: "10644", label: "FP-4200TS", masse: 2520, prix: 2394 },
+  { id: "fp-5700ts", code: "10625", label: "FP-5700TS", masse: 3363, prix: 2893.4 },
+  { id: "fp-100t-2gex", code: "11080", label: "FP-100T (Zone 1-2 ATEX)", masse: 61, prix: 511.1 },
+  { id: "fp-200t-2gex", code: "11081", label: "FP-200T (Zone 1-2 ATEX)", masse: 118, prix: 583.3 },
+  { id: "fp-500t-2gex", code: "11082", label: "FP-500T (Zone 1-2 ATEX)", masse: 330, prix: 781.2 },
+  { id: "fp-100ex", code: "11028", label: "FP-100EX (Zone 0 ATEX)", masse: 61, prix: 808.2 },
+  { id: "fp-200ex", code: "11073", label: "FP-200EX (Zone 0 ATEX)", masse: 118, prix: 867.6 },
+  { id: "fp-500ex", code: "11074", label: "FP-500EX (Zone 0 ATEX)", masse: 330, prix: 1083.6 },
+  { id: "fp-1200ex", code: "11075", label: "FP-1200EX (Zone 0 ATEX)", masse: 756, prix: 2289.6 },
+  { id: "fp-2000ex", code: "11076", label: "FP-2000EX (Zone 0 ATEX)", masse: 1200, prix: 2509.2 },
+  { id: "fp-3000ex", code: "11077", label: "FP-3000EX (Zone 0 ATEX)", masse: 1830, prix: 2601 },
+  { id: "fp-4200ex", code: "11078", label: "FP-4200EX (Zone 0 ATEX)", masse: 2520, prix: 3216.4 },
+  { id: "fp-5700ex", code: "11079", label: "FP-5700EX (Zone 0 ATEX)", masse: 3363, prix: 3828.4 },
+];
+
+const DEFAULT_FIREPRO_ACCESSOIRES = {
+  centrales: {
+    label: "Centrales",
+    items: [
+      { id: "c-fpc4r", code: "11007", label: "Minicentrale FPC-4R", prix: 50 },
+      { id: "c-fpc2", code: "11416", label: "Minicentrale FPC-2", prix: 421.8 },
+      { id: "c-sigmaxt", code: "10279", label: "Centrale Sigma XT", prix: 1067.4 },
+      { id: "c-activateur", code: "10173", label: "Activateur séquentiel", prix: 131.1 },
+      { id: "c-alim24", code: "AT-REC01", label: "Coffret alimentation 24V", prix: 990 },
+    ],
+  },
+  detection: {
+    label: "Détection",
+    items: [
+      { id: "d-bta57", code: "11272", label: "BTA V3 Cylindrique 57°C", prix: 115.9 },
+      { id: "d-bta68", code: "11273", label: "BTA V3 Cylindrique 68°C", prix: 115.9 },
+      { id: "d-bta79", code: "11274", label: "BTA V3 Cylindrique 79°C", prix: 115.9 },
+      { id: "d-bta93", code: "11275", label: "BTA V3 Cylindrique 93°C", prix: 115.9 },
+      { id: "d-bta141", code: "11276", label: "BTA V3 Cylindrique 141°C", prix: 115.9 },
+      { id: "d-bta182", code: "11277", label: "BTA V3 Cylindrique 182°C", prix: 115.9 },
+      { id: "d-btam57", code: "11284", label: "BTA V3 Mécanique 57°C", prix: 62.5 },
+      { id: "d-btam68", code: "11285", label: "BTA V3 Mécanique 68°C", prix: 62.5 },
+      { id: "d-btam79", code: "11286", label: "BTA V3 Mécanique 79°C", prix: 62.5 },
+      { id: "d-btam93", code: "11287", label: "BTA V3 Mécanique 93°C", prix: 62.5 },
+      { id: "d-btam141", code: "11288", label: "BTA V3 Mécanique 141°C", prix: 62.5 },
+      { id: "d-btam182", code: "11289", label: "BTA V3 Mécanique 182°C", prix: 62.5 },
+      { id: "d-btaadapt", code: "10585", label: "BTA Adaptateur", prix: 9 },
+      { id: "d-fpc5-20-60", code: "11113", label: "FPC-5 V2 pour FP-20 — 60°C", prix: 92.4 },
+      { id: "d-fpc5-20-70", code: "11114", label: "FPC-5 V2 pour FP-20 — 70°C", prix: 92.4 },
+      { id: "d-fpc5-20-80", code: "11115", label: "FPC-5 V2 pour FP-20 — 80°C", prix: 92.4 },
+      { id: "d-fpc5-20-100", code: "11116", label: "FPC-5 V2 pour FP-20 — 100°C", prix: 92.4 },
+      { id: "d-fpc5-20-lhd", code: "11117", label: "FPC-5 V2 pour FP-20 — LHD", prix: 92.4 },
+      { id: "d-fpc5-4080-60", code: "11118", label: "FPC-5 V2 pour FP-40/80 — 60°C", prix: 92.4 },
+      { id: "d-fpc5-4080-70", code: "11119", label: "FPC-5 V2 pour FP-40/80 — 70°C", prix: 92.4 },
+      { id: "d-fpc5-4080-80", code: "11120", label: "FPC-5 V2 pour FP-40/80 — 80°C", prix: 92.4 },
+      { id: "d-fpc5-4080-100", code: "11121", label: "FPC-5 V2 pour FP-40/80 — 100°C", prix: 92.4 },
+      { id: "d-fpc5-4080-lhd", code: "11122", label: "FPC-5 V2 pour FP-40/80 — LHD", prix: 92.4 },
+      { id: "d-fpc5-100500-60", code: "11123", label: "FPC-5 V2 pour FP-100/500 — 60°C", prix: 88 },
+      { id: "d-fpc5-100500-70", code: "11124", label: "FPC-5 V2 pour FP-100/500 — 70°C", prix: 88 },
+      { id: "d-fpc5-100500-80", code: "11125", label: "FPC-5 V2 pour FP-100/500 — 80°C", prix: 88 },
+      { id: "d-fpc5-100500-100", code: "11126", label: "FPC-5 V2 pour FP-100/500 — 100°C", prix: 88 },
+      { id: "d-fpc5-100500-lhd", code: "11127", label: "FPC-5 V2 pour FP-100/500 — LHD", prix: 88 },
+      { id: "d-cordon68", code: "10244", label: "Cordon thermique 68°C", prix: 22.5 },
+      { id: "d-cordon88", code: "10245", label: "Cordon thermique 88°C", prix: 22.5 },
+      { id: "d-cordon105", code: "10246", label: "Cordon thermique 105°C", prix: 22.5 },
+      { id: "d-cordon185", code: "10607", label: "Cordon thermique 185°C", prix: 25 },
+      { id: "d-termlhd", code: "10830", label: "Terminaison LHD", prix: 9 },
+      { id: "d-baseopt", code: "10990", label: "Base détecteur optique", prix: 18 },
+      { id: "d-detchal", code: "10992", label: "Détecteur de chaleur", prix: 47.5 },
+      { id: "d-detfum", code: "10991", label: "Détecteur de fumée", prix: 47.5 },
+    ],
+  },
+  relais: {
+    label: "Contacts, relayage",
+    items: [
+      { id: "r-thermo", code: "10994", label: "Contact thermorupteur", prix: 12 },
+      { id: "r-kittemp", code: "KIT-TEMP", label: "Kit temporisation extinction", prix: 500 },
+      { id: "r-kitsign", code: "KIT-SIGN", label: "Kit signalisation local", prix: 1000 },
+    ],
+  },
+  fixation: {
+    label: "Fixations",
+    items: [
+      { id: "f-bracket", code: "10492", label: "Bracket FP-100/500", prix: 21 },
+      { id: "f-aimants", code: "10640", label: "Aimants", prix: 18 },
+      { id: "f-vis", code: "FIX-VIS", label: "Vis", prix: 2 },
+    ],
+  },
+  mainOeuvre: {
+    label: "Main d'œuvre & transport",
+    items: [
+      { id: "mo-mesa", code: "MES-A", label: "Mise en service (Aérosol)", prix: 380 },
+      { id: "mo-mesc", code: "MES-C", label: "Mise en service (Centrale)", prix: 380 },
+      { id: "mo-instac", code: "INST-AC", label: "Installation (Aérosol Cylindrique)", prix: 250 },
+      { id: "mo-instab", code: "INST-AB", label: "Installation (Aérosol Box)", prix: 550 },
+      { id: "mo-instc", code: "INST-C", label: "Installation (Centrale)", prix: 450 },
+      { id: "mo-instd", code: "INST-D", label: "Installation (Détecteur)", prix: 250 },
+      { id: "mo-instkt", code: "INST-KT", label: "Installation (Temporisation)", prix: 300 },
+      { id: "mo-instks", code: "INST-KS", label: "Installation (Signalisation locale)", prix: 1000 },
+      { id: "mo-transp", code: "TRANSP", label: "Transport", prix: 75 },
+    ],
+  },
+};
+
+function nouvelleZoneFirePro(n) {
+  return {
+    id: uid(),
+    nom: `Local ${n}`,
+    largeur: 0,
+    profondeur: 0,
+    hauteur: 0,
+    volumeManuel: 0, // si > 0, prioritaire sur largeur × profondeur × hauteur
+    classeId: "a-pvc",
+    coefRemplissage: 1,
+    confinementId: "standard",
+    generateurs: {}, // { genId: quantite }
+    accessoires: {}, // { itemId: quantite }, toutes familles confondues
+  };
+}
+
+function volumeZoneFirePro(zone) {
+  if (zone.volumeManuel > 0) return zone.volumeManuel;
+  return (zone.largeur || 0) * (zone.profondeur || 0) * (zone.hauteur || 0);
+}
+
+function computeZoneFirePro(zone, classes, confinements, generateurs, accessoires) {
+  const classe = classes.find((c) => c.id === zone.classeId) || classes[0];
+  const confinement = confinements[zone.confinementId] || confinements.standard;
+  const volume = volumeZoneFirePro(zone);
+  const masseNecessaire = volume * classe.dad * (zone.coefRemplissage || 0) * confinement.coef;
+  let masseEffective = 0;
+  let montantGenerateurs = 0;
+  generateurs.forEach((g) => {
+    const qte = zone.generateurs[g.id] || 0;
+    masseEffective += qte * g.masse;
+    montantGenerateurs += qte * g.prix;
+  });
+  let montantAccessoires = 0;
+  Object.values(accessoires).forEach((famille) => {
+    famille.items.forEach((item) => {
+      const qte = zone.accessoires[item.id] || 0;
+      montantAccessoires += qte * item.prix;
+    });
+  });
+  return {
+    volume,
+    classe,
+    confinement,
+    masseNecessaire,
+    masseEffective,
+    montantGenerateurs,
+    montantAccessoires,
+    montantTotal: montantGenerateurs + montantAccessoires,
+    suffisant: masseEffective >= masseNecessaire && masseNecessaire > 0,
+  };
+}
 
 // Familles pour les "lignes libres" (batteries, composants, poste manuel)
 const FAMILLES_LIBRES = [
@@ -490,6 +675,20 @@ export default function ChiffrageHTMaintenance() {
   const renommerLigneCatalogueDirect = (familleKey, itemId, label) =>
     setCatalogueDirect((s) => ({ ...s, [familleKey]: { ...s[familleKey], items: s[familleKey].items.map((it) => (it.id === itemId ? { ...it, label } : it)) } }));
 
+  // FirePro — ajout/suppression/renommage des générateurs
+  const ajouterGenerateurFirePro = () =>
+    setFireproGenerateurs((arr) => [...arr, { id: uid(), code: "", label: "Nouveau générateur", masse: 0, prix: 0 }]);
+  const supprimerGenerateurFirePro = (id) => setFireproGenerateurs((arr) => arr.filter((g) => g.id !== id));
+  const renommerGenerateurFirePro = (id, label) => setFireproGenerateurs((arr) => arr.map((g) => (g.id === id ? { ...g, label } : g)));
+
+  // FirePro — ajout/suppression/renommage des accessoires (par famille)
+  const ajouterAccessoireFirePro = (famId) =>
+    setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: [...s[famId].items, { id: uid(), code: "", label: "Nouvel article", prix: 0 }] } }));
+  const supprimerAccessoireFirePro = (famId, itemId) =>
+    setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: s[famId].items.filter((it) => it.id !== itemId) } }));
+  const renommerAccessoireFirePro = (famId, itemId, label) =>
+    setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: s[famId].items.map((it) => (it.id === itemId ? { ...it, label } : it)) } }));
+
   // Contenu vierge d'un chiffrage — les tarifs/catalogues (ci-dessus) restent
   // partagés entre tous les chiffrages, seuls affaire/postes/lignes sont propres
   // à chaque chiffrage.
@@ -504,13 +703,36 @@ export default function ChiffrageHTMaintenance() {
       },
       postesEquipement: [nouveauPosteEquipement(1)],
       lignesLibres: [],
+      zonesFirePro: [nouvelleZoneFirePro(1)],
     };
   }
 
   const [affaire, setAffaire] = useState(saved.affaire || devisVierge().affaire);
   const [postesEquipement, setPostesEquipement] = useState(saved.postesEquipement || devisVierge().postesEquipement);
   const [lignesLibres, setLignesLibres] = useState(saved.lignesLibres || []);
+  const [zonesFirePro, setZonesFirePro] = useState(saved.zonesFirePro || devisVierge().zonesFirePro);
   const [nbAAjouter, setNbAAjouter] = useState(1);
+
+  // Paramètres FirePro — partagés entre chiffrages, comme tarifs/catalogues.
+  const [fireproClasses, setFireproClasses] = useState(saved.fireproClasses || DEFAULT_FIREPRO_CLASSES);
+  const [fireproConfinement, setFireproConfinement] = useState(saved.fireproConfinement || DEFAULT_FIREPRO_CONFINEMENT);
+  const [fireproGenerateurs, setFireproGenerateurs] = useState(saved.fireproGenerateurs || DEFAULT_FIREPRO_GENERATEURS);
+  const [fireproAccessoires, setFireproAccessoires] = useState(saved.fireproAccessoires || DEFAULT_FIREPRO_ACCESSOIRES);
+  const [fireproCoefAjustement, setFireproCoefAjustement] = useState(saved.fireproCoefAjustement ?? 1);
+
+  const addZoneFirePro = () => setZonesFirePro((zs) => [...zs, nouvelleZoneFirePro(zs.length + 1)]);
+  const dupliquerZoneFirePro = (id) =>
+    setZonesFirePro((zs) => {
+      const src = zs.find((z) => z.id === id);
+      if (!src) return zs;
+      return [...zs, { ...src, id: uid(), nom: `${src.nom} (copie)`, generateurs: { ...src.generateurs }, accessoires: { ...src.accessoires } }];
+    });
+  const updateZoneFirePro = (id, patch) => setZonesFirePro((zs) => zs.map((z) => (z.id === id ? { ...z, ...patch } : z)));
+  const removeZoneFirePro = (id) => setZonesFirePro((zs) => (zs.length > 1 ? zs.filter((z) => z.id !== id) : zs));
+  const setGenerateurZone = (zoneId, genId, v) =>
+    setZonesFirePro((zs) => zs.map((z) => (z.id === zoneId ? { ...z, generateurs: { ...z.generateurs, [genId]: Math.max(0, v) } } : z)));
+  const setAccessoireZone = (zoneId, itemId, v) =>
+    setZonesFirePro((zs) => zs.map((z) => (z.id === zoneId ? { ...z, accessoires: { ...z.accessoires, [itemId]: Math.max(0, v) } } : z)));
 
   const addPosteEquipement = () => setPostesEquipement((ps) => [...ps, nouveauPosteEquipement(ps.length + 1)]);
   const dupliquerPosteEquipement = (id) =>
@@ -599,6 +821,10 @@ export default function ChiffrageHTMaintenance() {
           setCatalogueTemps(catalogueTempsValide(data.catalogueTemps) ? data.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
           setCatalogueCoef({ ...DEFAULT_CATALOGUE_COEF, ...(data.catalogueCoef || {}) });
           setCatalogueDirect(migrerCatalogueDirect(data.catalogueDirect));
+          if (data.fireproClasses) setFireproClasses(data.fireproClasses);
+          if (data.fireproConfinement) setFireproConfinement(data.fireproConfinement);
+          if (data.fireproGenerateurs) setFireproGenerateurs(data.fireproGenerateurs);
+          if (data.fireproAccessoires) setFireproAccessoires(data.fireproAccessoires);
         }
         setSyncState("synced");
       })
@@ -626,6 +852,8 @@ export default function ChiffrageHTMaintenance() {
         setAffaire(target.affaire || devisVierge().affaire);
         setPostesEquipement(target.postesEquipement || devisVierge().postesEquipement);
         setLignesLibres(target.lignesLibres || []);
+        setZonesFirePro(target.zonesFirePro || devisVierge().zonesFirePro);
+        setFireproCoefAjustement(target.fireproCoefAjustement ?? 1);
         setDevisReady(true);
       })
       .catch(() => setSyncState("error"));
@@ -643,6 +871,8 @@ export default function ChiffrageHTMaintenance() {
           setAffaire(data.affaire || devisVierge().affaire);
           setPostesEquipement(data.postesEquipement || devisVierge().postesEquipement);
           setLignesLibres(data.lignesLibres || []);
+          setZonesFirePro(data.zonesFirePro || devisVierge().zonesFirePro);
+          setFireproCoefAjustement(data.fireproCoefAjustement ?? 1);
         }
         setDevisReady(true);
       })
@@ -653,13 +883,15 @@ export default function ChiffrageHTMaintenance() {
     const blank = devisVierge();
     setDevisReady(false);
     try {
-      const payload = { ...blank, updatedAt: Date.now() };
+      const payload = { ...blank, fireproCoefAjustement: 1, updatedAt: Date.now() };
       const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
       setDevisList((l) => [{ id: ref.id, reference: blank.affaire.reference, client: "", updatedAt: payload.updatedAt }, ...l]);
       setCurrentDevisId(ref.id);
       setAffaire(blank.affaire);
       setPostesEquipement(blank.postesEquipement);
       setLignesLibres(blank.lignesLibres);
+      setZonesFirePro(blank.zonesFirePro);
+      setFireproCoefAjustement(1);
     } finally {
       setDevisReady(true);
     }
@@ -672,6 +904,8 @@ export default function ChiffrageHTMaintenance() {
         affaire: { ...affaire, reference: affaire.reference + " (copie)" },
         postesEquipement: postesEquipement.map((p) => ({ ...p, quantites: { ...p.quantites } })),
         lignesLibres: lignesLibres.map((l) => ({ ...l })),
+        zonesFirePro: zonesFirePro.map((z) => ({ ...z, generateurs: { ...z.generateurs }, accessoires: { ...z.accessoires } })),
+        fireproCoefAjustement,
         updatedAt: Date.now(),
       };
       const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
@@ -680,6 +914,8 @@ export default function ChiffrageHTMaintenance() {
       setAffaire(payload.affaire);
       setPostesEquipement(payload.postesEquipement);
       setLignesLibres(payload.lignesLibres);
+      setZonesFirePro(payload.zonesFirePro);
+      setFireproCoefAjustement(payload.fireproCoefAjustement);
     } finally {
       setDevisReady(true);
     }
@@ -703,14 +939,41 @@ export default function ChiffrageHTMaintenance() {
   // chiffrages) dans le cloud, après une courte pause.
   useEffect(() => {
     if (!authReady) return;
-    const payload = { tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect };
+    const payload = {
+      tarifs,
+      majorations,
+      degressivite,
+      coefContrat,
+      heuresJour,
+      catalogueTemps,
+      catalogueCoef,
+      catalogueDirect,
+      fireproClasses,
+      fireproConfinement,
+      fireproGenerateurs,
+      fireproAccessoires,
+    };
     const t = setTimeout(() => {
       setDoc(doc(db, FIRESTORE_DOC), payload)
         .then(() => setSyncState("synced"))
         .catch(() => setSyncState("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [authReady, tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect]);
+  }, [
+    authReady,
+    tarifs,
+    majorations,
+    degressivite,
+    coefContrat,
+    heuresJour,
+    catalogueTemps,
+    catalogueCoef,
+    catalogueDirect,
+    fireproClasses,
+    fireproConfinement,
+    fireproGenerateurs,
+    fireproAccessoires,
+  ]);
 
   // Enregistre automatiquement le chiffrage courant (affaire + postes +
   // lignes libres) dans son propre document, sans toucher aux autres.
@@ -718,7 +981,7 @@ export default function ChiffrageHTMaintenance() {
     if (!authReady || !devisReady || !currentDevisId) return;
     setSyncState("syncing");
     const t = setTimeout(() => {
-      const payload = { affaire, postesEquipement, lignesLibres, updatedAt: Date.now() };
+      const payload = { affaire, postesEquipement, lignesLibres, zonesFirePro, fireproCoefAjustement, updatedAt: Date.now() };
       setDoc(doc(db, DEVIS_COLLECTION, currentDevisId), payload)
         .then(() => {
           setSyncState("synced");
@@ -727,7 +990,7 @@ export default function ChiffrageHTMaintenance() {
         .catch(() => setSyncState("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [authReady, devisReady, currentDevisId, affaire, postesEquipement, lignesLibres]);
+  }, [authReady, devisReady, currentDevisId, affaire, postesEquipement, lignesLibres, zonesFirePro, fireproCoefAjustement]);
 
   // Cache local (rechargement rapide avant que le cloud ne réponde)
   useEffect(() => {
@@ -748,12 +1011,38 @@ export default function ChiffrageHTMaintenance() {
           lignesLibres,
           devisList,
           currentDevisId,
+          zonesFirePro,
+          fireproClasses,
+          fireproConfinement,
+          fireproGenerateurs,
+          fireproAccessoires,
+          fireproCoefAjustement,
         })
       );
     } catch {
       // stockage local indisponible (navigation privée, quota dépassé...) — on continue sans bloquer
     }
-  }, [tarifs, majorations, degressivite, coefContrat, heuresJour, catalogueTemps, catalogueCoef, catalogueDirect, affaire, postesEquipement, lignesLibres, devisList, currentDevisId]);
+  }, [
+    tarifs,
+    majorations,
+    degressivite,
+    coefContrat,
+    heuresJour,
+    catalogueTemps,
+    catalogueCoef,
+    catalogueDirect,
+    affaire,
+    postesEquipement,
+    lignesLibres,
+    devisList,
+    currentDevisId,
+    zonesFirePro,
+    fireproClasses,
+    fireproConfinement,
+    fireproGenerateurs,
+    fireproAccessoires,
+    fireproCoefAjustement,
+  ]);
 
   // Enregistre immédiatement les paramètres/catalogues, sans attendre le
   // délai automatique (utile pour une confirmation explicite à l'utilisateur).
@@ -781,6 +1070,10 @@ export default function ChiffrageHTMaintenance() {
           setCatalogueTemps(catalogueTempsValide(data.catalogueTemps) ? data.catalogueTemps : DEFAULT_CATALOGUE_TEMPS);
           setCatalogueCoef({ ...DEFAULT_CATALOGUE_COEF, ...(data.catalogueCoef || {}) });
           setCatalogueDirect(migrerCatalogueDirect(data.catalogueDirect));
+          if (data.fireproClasses) setFireproClasses(data.fireproClasses);
+          if (data.fireproConfinement) setFireproConfinement(data.fireproConfinement);
+          if (data.fireproGenerateurs) setFireproGenerateurs(data.fireproGenerateurs);
+          if (data.fireproAccessoires) setFireproAccessoires(data.fireproAccessoires);
         }
         setSyncState("synced");
       })
@@ -803,11 +1096,13 @@ export default function ChiffrageHTMaintenance() {
   // les lignes libres pour repartir sur un devis neuf. Ne touche pas aux
   // tarifs/catalogues de Paramètres.
   const razChiffrage = () => {
-    if (!window.confirm("Remettre à zéro le chiffrage en cours (infos affaire, équipements saisis, lignes libres) ? Cette action est irréversible.")) return;
+    if (!window.confirm("Remettre à zéro le chiffrage en cours (infos affaire, équipements saisis, lignes libres, zones FirePro) ? Cette action est irréversible.")) return;
     const blank = devisVierge();
     setAffaire(blank.affaire);
     setPostesEquipement(blank.postesEquipement);
     setLignesLibres(blank.lignesLibres);
+    setZonesFirePro(blank.zonesFirePro);
+    setFireproCoefAjustement(1);
   };
 
 
@@ -945,6 +1240,14 @@ export default function ChiffrageHTMaintenance() {
 
   const nbEquipementsSaisis =
     postesEquipement.reduce((s, p) => s + Object.values(p.quantites).filter((v) => v > 0).length, 0) + lignesLibres.length;
+
+  // ---- Calculs FirePro (dimensionnement + chiffrage par zone) ----
+  const zonesFireProCalc = useMemo(
+    () => zonesFirePro.map((zone) => ({ zone, ...computeZoneFirePro(zone, fireproClasses, fireproConfinement, fireproGenerateurs, fireproAccessoires) })),
+    [zonesFirePro, fireproClasses, fireproConfinement, fireproGenerateurs, fireproAccessoires]
+  );
+  const totalFireProAvantCoef = zonesFireProCalc.reduce((s, z) => s + z.montantTotal, 0);
+  const totalFirePro = totalFireProAvantCoef * (fireproCoefAjustement || 1);
 
   // ---- Export Word (.docx) ----
   // Génère un vrai fichier .docx (Office Open XML), ouvrable par Word, Pages
@@ -1174,6 +1477,7 @@ export default function ChiffrageHTMaintenance() {
         <div className="max-w-6xl mx-auto flex px-4 md:px-6 overflow-x-auto">
           {tabBtn("chiffrage", "Chiffrage", ClipboardList)}
           {tabBtn("recap", "Récapitulatif", FileText)}
+          {tabBtn("firepro", "FirePro", Flame)}
           {tabBtn("parametres", "Paramètres & catalogue", Settings2)}
         </div>
       </div>
@@ -1609,6 +1913,196 @@ export default function ChiffrageHTMaintenance() {
           </>
         )}
 
+        {/* ---------------- ONGLET FIREPRO ---------------- */}
+        {tab === "firepro" && (
+          <>
+            {zonesFireProCalc.map(({ zone, volume, masseNecessaire, masseEffective, montantTotal, suffisant }, index) => (
+              <SectionCard
+                key={zone.id}
+                title={zone.nom}
+                subtitle="Dimensionnement EN 15276 : masse nécessaire = volume × densité de la classe (g/m³) × coef. remplissage × coef. confinement"
+                icon={Flame}
+                bg={index % 2 === 1 ? "#F3F4F5" : "#fff"}
+                right={
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => dupliquerZoneFirePro(zone.id)} title="Dupliquer ce local" style={{ color: INK_2 }} className="p-1.5">
+                      <Copy size={16} />
+                    </button>
+                    {zonesFirePro.length > 1 && (
+                      <button onClick={() => removeZoneFirePro(zone.id)} title="Supprimer ce local" style={{ color: "#B0473E" }} className="p-1.5">
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
+                }
+              >
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Nom du local</label>
+                    <TextField value={zone.nom} onChange={(v) => updateZoneFirePro(zone.id, { nom: v })} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Classe de feu</label>
+                    <Select
+                      value={zone.classeId}
+                      onChange={(v) => updateZoneFirePro(zone.id, { classeId: v })}
+                      options={fireproClasses.map((c) => ({ value: c.id, label: `${c.label} (${c.dad} g/m³)` }))}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Confinement</label>
+                    <Select
+                      value={zone.confinementId}
+                      onChange={(v) => updateZoneFirePro(zone.id, { confinementId: v })}
+                      options={Object.entries(fireproConfinement).map(([k, v]) => ({ value: k, label: `${v.label} (×${v.coef})` }))}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-1">
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Largeur (m)</label>
+                    <NumberField value={zone.largeur} onChange={(v) => updateZoneFirePro(zone.id, { largeur: v })} width="100%" />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Profondeur (m)</label>
+                    <NumberField value={zone.profondeur} onChange={(v) => updateZoneFirePro(zone.id, { profondeur: v })} width="100%" />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Hauteur (m)</label>
+                    <NumberField value={zone.hauteur} onChange={(v) => updateZoneFirePro(zone.id, { hauteur: v })} width="100%" />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Coef. remplissage</label>
+                    <NumberField value={zone.coefRemplissage} onChange={(v) => updateZoneFirePro(zone.id, { coefRemplissage: v })} suffix="×" width="100%" />
+                  </div>
+                </div>
+                <div className="mb-4">
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Volume forcé (m³) — optionnel, prioritaire sur largeur × profondeur × hauteur</label>
+                  <NumberField value={zone.volumeManuel} onChange={(v) => updateZoneFirePro(zone.id, { volumeManuel: v })} suffix="m³" width={140} />
+                </div>
+
+                <div
+                  style={{ background: suffisant ? "#EAF6EC" : "#FDEEEC", border: `1px solid ${suffisant ? "#8FBF98" : "#E3A79E"}`, borderRadius: 8 }}
+                  className="p-3 mb-5 flex flex-wrap gap-x-6 gap-y-1 items-center justify-between"
+                >
+                  <span style={{ fontSize: 13, color: INK }}>Volume : <b>{volume.toFixed(2)} m³</b></span>
+                  <span style={{ fontSize: 13, color: INK }}>Masse nécessaire : <b>{Math.round(masseNecessaire)} g</b></span>
+                  <span style={{ fontSize: 13, color: INK }}>Masse effective : <b>{Math.round(masseEffective)} g</b></span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: suffisant ? "#2F7D3C" : "#B0473E" }}>{suffisant ? "✓ Suffisant" : "✗ Insuffisant"}</span>
+                </div>
+
+                <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>Générateurs</div>
+                <div className="overflow-x-auto mb-5">
+                  <table className="w-full" style={{ fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ color: MUTED, textAlign: "left" }}>
+                        <th className="pb-1.5 font-medium">Désignation</th>
+                        <th className="pb-1.5 font-medium text-right">Masse</th>
+                        <th className="pb-1.5 font-medium text-right">Prix</th>
+                        <th className="pb-1.5 font-medium text-right">Qté</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {fireproGenerateurs.map((g) => {
+                        const qte = zone.generateurs[g.id] || 0;
+                        return (
+                          <tr key={g.id} style={{ borderTop: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                            <td className="py-1.5 pr-3" style={{ color: INK }}>{g.label}</td>
+                            <td className="py-1.5 text-right" style={{ color: MUTED }}>{g.masse} g</td>
+                            <td className="py-1.5 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums" }}>{euros(g.prix)}</td>
+                            <td className="py-1.5 text-right" style={{ width: 90 }}>
+                              <NumberField value={qte} onChange={(v) => setGenerateurZone(zone.id, g.id, v)} suffix="u" width={64} />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {Object.entries(fireproAccessoires).map(([famId, fam]) => (
+                  <div key={famId} className="mb-5">
+                    <div style={{ fontWeight: 600, color: INK_2, fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{fam.label}</div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full" style={{ fontSize: 13 }}>
+                        <tbody>
+                          {fam.items.map((item) => {
+                            const qte = zone.accessoires[item.id] || 0;
+                            return (
+                              <tr key={item.id} style={{ borderBottom: `1px solid ${LINE}`, background: qte > 0 ? "#FBF3E4" : "transparent" }}>
+                                <td className="py-1.5 pr-3" style={{ color: INK }}>{item.label}</td>
+                                <td className="py-1.5 text-right" style={{ color: MUTED, fontVariantNumeric: "tabular-nums", width: 90 }}>{euros(item.prix)}</td>
+                                <td className="py-1.5 text-right" style={{ width: 90 }}>
+                                  <NumberField value={qte} onChange={(v) => setAccessoireZone(zone.id, item.id, v)} suffix="u" width={64} />
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+
+                <div className="flex items-center justify-between pt-3" style={{ borderTop: `2px solid ${INK}` }}>
+                  <span style={{ fontWeight: 700, color: INK }}>Sous-total {zone.nom}</span>
+                  <span style={{ fontWeight: 800, color: INK, fontSize: 18, fontVariantNumeric: "tabular-nums" }}>{euros(montantTotal)}</span>
+                </div>
+              </SectionCard>
+            ))}
+
+            <button
+              onClick={addZoneFirePro}
+              className="flex items-center justify-center gap-1.5 px-4 py-3 rounded-lg text-sm font-medium border-2 border-dashed"
+              style={{ borderColor: LINE, color: INK_2 }}
+            >
+              <Plus size={16} /> Ajouter un local
+            </button>
+
+            <SectionCard title="Récapitulatif FirePro" icon={FileText}>
+              <div className="overflow-x-auto">
+                <table className="w-full" style={{ fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ color: MUTED, textAlign: "left" }}>
+                      <th className="pb-2 font-medium">Local</th>
+                      <th className="pb-2 font-medium text-right">Masse nécess.</th>
+                      <th className="pb-2 font-medium text-right">Masse effective</th>
+                      <th className="pb-2 font-medium text-right">Montant HT</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {zonesFireProCalc.map(({ zone, masseNecessaire, masseEffective, montantTotal, suffisant }) => (
+                      <tr key={zone.id} style={{ borderTop: `1px solid ${LINE}` }}>
+                        <td className="py-2" style={{ color: INK }}>
+                          {zone.nom} {!suffisant && <span style={{ color: "#B0473E", fontSize: 11.5 }}>(insuffisant)</span>}
+                        </td>
+                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{Math.round(masseNecessaire)} g</td>
+                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{Math.round(masseEffective)} g</td>
+                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{euros(montantTotal)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-col gap-2.5 mt-5" style={{ fontSize: 13.5 }}>
+                <div className="flex items-center justify-between">
+                  <span style={{ color: INK }}>Montant HT avant coefficient</span>
+                  <span style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalFireProAvantCoef)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span style={{ color: INK }}>Coefficient d'ajustement</span>
+                  <NumberField value={fireproCoefAjustement} onChange={setFireproCoefAjustement} suffix="×" width={90} />
+                </div>
+                <div style={{ borderTop: `2px solid ${INK}`, marginTop: 6, paddingTop: 12 }} className="flex items-center justify-between">
+                  <span style={{ fontWeight: 700, color: INK, fontSize: 16 }}>TOTAL HT FIREPRO</span>
+                  <span style={{ fontWeight: 800, color: INK, fontSize: 24, fontVariantNumeric: "tabular-nums" }}>{euros(totalFirePro)}</span>
+                </div>
+              </div>
+            </SectionCard>
+          </>
+        )}
+
         {/* ---------------- ONGLET PARAMETRES ---------------- */}
         {tab === "parametres" && (
           <>
@@ -1820,6 +2314,96 @@ export default function ChiffrageHTMaintenance() {
                         ))}
                       </div>
                     )}
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <SectionCard title="FirePro — Classes de feu (densité DAD, g/m³)" subtitle="Masse nécessaire = volume × DAD × coef. remplissage × coef. confinement" icon={Flame}>
+              <div className="flex flex-col gap-1.5">
+                {fireproClasses.map((c, i) => (
+                  <div key={c.id} className="grid grid-cols-3 gap-3 items-center">
+                    <span style={{ fontSize: 13, color: INK, gridColumn: "span 2" }}>{c.label}</span>
+                    <NumberField value={c.dad} onChange={(v) => setFireproClasses((arr) => arr.map((x, j) => (j === i ? { ...x, dad: v } : x)))} suffix="g/m³" />
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <SectionCard title="FirePro — Coefficients de confinement" icon={Flame}>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {Object.entries(fireproConfinement).map(([key, c]) => (
+                  <div key={key}>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>{c.label}</label>
+                    <NumberField value={c.coef} onChange={(v) => setFireproConfinement((s) => ({ ...s, [key]: { ...s[key], coef: v } }))} suffix="×" width="100%" />
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <SectionCard
+              title="FirePro — Générateurs (désignation, masse, prix)"
+              icon={Flame}
+              right={
+                <button onClick={ajouterGenerateurFirePro} className="flex items-center gap-1 text-xs font-medium" style={{ color: INK_2 }}>
+                  <Plus size={13} /> Ajouter un générateur
+                </button>
+              }
+            >
+              <div className="overflow-x-auto">
+                <div className="flex flex-col gap-1.5">
+                  <div className="grid grid-cols-5 gap-3" style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>
+                    <span style={{ gridColumn: "span 2" }}></span>
+                    <span>Masse (g)</span>
+                    <span>Prix (€)</span>
+                    <span></span>
+                  </div>
+                  {fireproGenerateurs.map((g, i) => (
+                    <div key={g.id} className="grid grid-cols-5 gap-3 items-center">
+                      <div style={{ gridColumn: "span 2" }}>
+                        <TextField value={g.label} onChange={(v) => renommerGenerateurFirePro(g.id, v)} />
+                      </div>
+                      <NumberField value={g.masse} onChange={(v) => setFireproGenerateurs((arr) => arr.map((x, j) => (j === i ? { ...x, masse: v } : x)))} width="100%" />
+                      <NumberField value={g.prix} onChange={(v) => setFireproGenerateurs((arr) => arr.map((x, j) => (j === i ? { ...x, prix: v } : x)))} suffix="€" width="100%" />
+                      <button onClick={() => supprimerGenerateurFirePro(g.id)} style={{ color: "#B0473E" }} className="flex justify-end">
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </SectionCard>
+
+            <SectionCard title="FirePro — Centrales, détection, relayage, fixations, main d'œuvre" icon={Flame}>
+              <div className="flex flex-col gap-5">
+                {Object.entries(fireproAccessoires).map(([famId, fam]) => (
+                  <div key={famId}>
+                    <div className="flex items-center justify-between mb-2">
+                      <div style={{ fontWeight: 600, color: INK, fontSize: 13 }}>{fam.label}</div>
+                      <button onClick={() => ajouterAccessoireFirePro(famId)} className="flex items-center gap-1 text-xs font-medium" style={{ color: INK_2 }}>
+                        <Plus size={13} /> Ajouter une ligne
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      {fam.items.map((item, i) => (
+                        <div key={item.id} className="grid grid-cols-4 gap-3 items-center">
+                          <div style={{ gridColumn: "span 2" }}>
+                            <TextField value={item.label} onChange={(v) => renommerAccessoireFirePro(famId, item.id, v)} />
+                          </div>
+                          <NumberField
+                            value={item.prix}
+                            onChange={(v) =>
+                              setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: s[famId].items.map((it, j) => (j === i ? { ...it, prix: v } : it)) } }))
+                            }
+                            suffix="€"
+                            width="100%"
+                          />
+                          <button onClick={() => supprimerAccessoireFirePro(famId, item.id)} style={{ color: "#B0473E" }} className="flex justify-end">
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ))}
               </div>
