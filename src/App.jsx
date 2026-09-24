@@ -2665,12 +2665,20 @@ export default function ChiffrageHTMaintenance() {
                           <span colSpan={2}>Prix de vente</span>
                           <span></span>
                         </div>
-                        {cat.items.map((item, i) => {
-                          const majBatterie = (patch) => {
-                            const next = { ...item, ...patch };
-                            next.prix = next.prixAchat * next.coef;
-                            setCatalogueDirect((s) => ({ ...s, batteries: { ...s.batteries, items: s.batteries.items.map((it, j) => (j === i ? next : it)) } }));
-                          };
+                        {cat.items.map((item) => {
+                          const majBatterie = (patch) =>
+                            setCatalogueDirect((s) => ({
+                              ...s,
+                              batteries: {
+                                ...s.batteries,
+                                items: s.batteries.items.map((it) => {
+                                  if (it.id !== item.id) return it;
+                                  const next = { ...it, ...patch };
+                                  next.prix = next.prixAchat * next.coef;
+                                  return next;
+                                }),
+                              },
+                            }));
                           return (
                             <div key={item.id} className="grid grid-cols-6 gap-2 items-center">
                               <TextField value={item.label} onChange={(v) => renommerLigneCatalogueDirect(key, item.id, v)} />
@@ -2686,14 +2694,16 @@ export default function ChiffrageHTMaintenance() {
                       </div>
                     ) : (
                       <div className="flex flex-col gap-1.5">
-                        {cat.items.map((item, i) => (
+                        {cat.items.map((item) => (
                           <div key={item.id} className="grid grid-cols-4 gap-3 items-center">
                             <div style={{ gridColumn: "span 2" }}>
                               <TextField value={item.label} onChange={(v) => renommerLigneCatalogueDirect(key, item.id, v)} />
                             </div>
                             <NumberField
                               value={item.prix}
-                              onChange={(v) => setCatalogueDirect((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it, j) => (j === i ? { ...it, prix: v } : it)) } }))}
+                              onChange={(v) =>
+                                setCatalogueDirect((s) => ({ ...s, [key]: { ...s[key], items: s[key].items.map((it) => (it.id === item.id ? { ...it, prix: v } : it)) } }))
+                              }
                               suffix="€"
                             />
                             <button onClick={() => supprimerLigneCatalogueDirect(key, item.id)} style={{ color: "#B0473E" }} className="flex justify-end">
@@ -2747,13 +2757,13 @@ export default function ChiffrageHTMaintenance() {
                     <span>Prix (€)</span>
                     <span></span>
                   </div>
-                  {fireproGenerateurs.map((g, i) => (
+                  {fireproGenerateurs.map((g) => (
                     <div key={g.id} className="grid grid-cols-5 gap-3 items-center">
                       <div style={{ gridColumn: "span 2" }}>
                         <TextField value={g.label} onChange={(v) => renommerGenerateurFirePro(g.id, v)} />
                       </div>
                       <NumberField value={g.masse} onChange={(v) => majMasseGenerateurFirePro(g.id, v)} width="100%" />
-                      <NumberField value={g.prix} onChange={(v) => setFireproGenerateurs((arr) => arr.map((x, j) => (j === i ? { ...x, prix: v } : x)))} suffix="€" width="100%" />
+                      <NumberField value={g.prix} onChange={(v) => setFireproGenerateurs((arr) => arr.map((x) => (x.id === g.id ? { ...x, prix: v } : x)))} suffix="€" width="100%" />
                       <button onClick={() => supprimerGenerateurFirePro(g.id)} style={{ color: "#B0473E" }} className="flex justify-end">
                         <Trash2 size={14} />
                       </button>
@@ -2774,7 +2784,7 @@ export default function ChiffrageHTMaintenance() {
                       </button>
                     </div>
                     <div className="flex flex-col gap-1.5">
-                      {fam.items.map((item, i) => (
+                      {fam.items.map((item) => (
                         <div key={item.id} className="grid grid-cols-4 gap-3 items-center">
                           <div style={{ gridColumn: "span 2" }}>
                             <TextField value={item.label} onChange={(v) => renommerAccessoireFirePro(famId, item.id, v)} />
@@ -2782,7 +2792,7 @@ export default function ChiffrageHTMaintenance() {
                           <NumberField
                             value={item.prix}
                             onChange={(v) =>
-                              setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: s[famId].items.map((it, j) => (j === i ? { ...it, prix: v } : it)) } }))
+                              setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: s[famId].items.map((it) => (it.id === item.id ? { ...it, prix: v } : it)) } }))
                             }
                             suffix="€"
                             width="100%"
