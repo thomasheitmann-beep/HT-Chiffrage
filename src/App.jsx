@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy, Flame } from "lucide-react";
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import { doc, getDoc, setDoc, collection, getDocs, addDoc, deleteDoc } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { db, auth } from "./firebase";
@@ -1105,6 +1107,14 @@ export default function ChiffrageHTMaintenance() {
     setFireproCoefAjustement(1);
   };
 
+  // RAZ FirePro seul : vide les locaux FirePro sans toucher au chiffrage HT/BT
+  // (affaire, postes, lignes libres) du même devis.
+  const razFirePro = () => {
+    if (!window.confirm("Remettre à zéro les locaux FirePro de ce chiffrage ? Cette action est irréversible.")) return;
+    setZonesFirePro(devisVierge().zonesFirePro);
+    setFireproCoefAjustement(1);
+  };
+
 
   const addLigneLibre = (n = 1) =>
     setLignesLibres((ls) => [
@@ -1370,6 +1380,73 @@ export default function ChiffrageHTMaintenance() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  // ---- Export PDF du récapitulatif FirePro ----
+  function exportFireProPdf() {
+    const dateStr = new Date().toLocaleDateString("fr-FR");
+    const docPdf = new jsPDF();
+    const inkRgb = [27, 39, 51];
+    const amberRgb = [232, 163, 61];
+
+    docPdf.setFontSize(18);
+    docPdf.setTextColor(...inkRgb);
+    docPdf.text("Récapitulatif FirePro — HT Maintenance", 14, 18);
+    docPdf.setDrawColor(...amberRgb);
+    docPdf.setLineWidth(1);
+    docPdf.line(14, 21, 196, 21);
+
+    docPdf.setFontSize(10.5);
+    docPdf.setTextColor(60, 60, 60);
+    const infos = [
+      [`Référence : ${affaire.reference || "—"}`, `Date : ${dateStr}`],
+      [`Client : ${affaire.client || "—"}`, `Site : ${affaire.site || "—"}`],
+    ];
+    let y = 30;
+    infos.forEach((ligne) => {
+      docPdf.text(ligne[0], 14, y);
+      docPdf.text(ligne[1], 110, y);
+      y += 6;
+    });
+
+    autoTable(docPdf, {
+      startY: y + 4,
+      head: [["Local", "Classe de feu", "Volume (m³)", "Masse nécess. (g)", "Masse eff. (g)", "Montant HT"]],
+      body: zonesFireProCalc.map(({ zone, classe, volume, masseNecessaire, masseEffective, montantTotal, suffisant }) => [
+        zone.nom + (suffisant ? "" : "  (insuffisant)"),
+        classe.label,
+        volume.toFixed(2),
+        Math.round(masseNecessaire),
+        Math.round(masseEffective),
+        euros(montantTotal),
+      ]),
+      headStyles: { fillColor: inkRgb, textColor: 255 },
+      styles: { fontSize: 9 },
+      margin: { left: 14, right: 14 },
+    });
+
+    let yFin = docPdf.lastAutoTable.finalY + 10;
+    const lignesRecap = [
+      ["Montant HT avant coefficient", euros(totalFireProAvantCoef)],
+      [`Coefficient d'ajustement (×${fireproCoefAjustement})`, euros(totalFirePro)],
+    ];
+    docPdf.setFontSize(10.5);
+    docPdf.setTextColor(...inkRgb);
+    lignesRecap.forEach(([label, val]) => {
+      docPdf.text(label, 14, yFin);
+      docPdf.text(val, 196, yFin, { align: "right" });
+      yFin += 7;
+    });
+    docPdf.setDrawColor(...inkRgb);
+    docPdf.setLineWidth(0.8);
+    docPdf.line(14, yFin, 196, yFin);
+    yFin += 8;
+    docPdf.setFontSize(14);
+    docPdf.setFont(undefined, "bold");
+    docPdf.text("TOTAL HT FIREPRO", 14, yFin);
+    docPdf.text(euros(totalFirePro), 196, yFin, { align: "right" });
+
+    docPdf.save(`FirePro_${(affaire.reference || "HT-Maintenance").replace(/[^a-zA-Z0-9_-]/g, "_")}.pdf`);
   }
 
   const tabBtn = (id, label, Icon) => (
@@ -1916,6 +1993,12 @@ export default function ChiffrageHTMaintenance() {
         {/* ---------------- ONGLET FIREPRO ---------------- */}
         {tab === "firepro" && (
           <>
+            <div className="flex justify-end">
+              <button onClick={razFirePro} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: "#B0473E" }}>
+                <Trash2 size={14} /> RAZ FirePro
+              </button>
+            </div>
+
             {zonesFireProCalc.map(({ zone, volume, masseNecessaire, masseEffective, montantTotal, suffisant }, index) => (
               <SectionCard
                 key={zone.id}
@@ -2060,7 +2143,15 @@ export default function ChiffrageHTMaintenance() {
               <Plus size={16} /> Ajouter un local
             </button>
 
-            <SectionCard title="Récapitulatif FirePro" icon={FileText}>
+            <SectionCard
+              title="Récapitulatif FirePro"
+              icon={FileText}
+              right={
+                <button onClick={exportFireProPdf} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                  <Download size={15} /> Exporter en PDF
+                </button>
+              }
+            >
               <div className="overflow-x-auto">
                 <table className="w-full" style={{ fontSize: 13 }}>
                   <thead>
