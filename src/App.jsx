@@ -657,38 +657,45 @@ export default function ChiffrageHTMaintenance() {
   const [catalogueCoef, setCatalogueCoef] = useState({ ...DEFAULT_CATALOGUE_COEF, ...(saved.catalogueCoef || {}) });
   const [catalogueDirect, setCatalogueDirect] = useState(migrerCatalogueDirect(saved.catalogueDirect));
 
-  const capaciteAh = (label) => {
+  // Extrait le premier nombre trouvé dans un libellé (ex. "45 Ah" -> 45,
+  // "60°C" -> 60) pour trier les catalogues par ordre croissant. Renvoie
+  // Infinity si aucun nombre n'est trouvé (l'élément reste en fin de liste).
+  const extraireNombreLabel = (label) => {
     const m = String(label).match(/[\d.,]+/);
     return m ? parseFloat(m[0].replace(",", ".")) : Infinity;
   };
+  const trierParLabel = (items) => [...items].sort((a, b) => extraireNombreLabel(a.label) - extraireNombreLabel(b.label));
+
   const ajouterLigneCatalogueDirect = (familleKey) =>
     setCatalogueDirect((s) => {
-      if (familleKey === "batteries") {
-        const nouvelItem = { id: uid(), label: "Nouvelle capacité", prixAchat: 0, coef: 2, prix: 0 };
-        const items = [...s.batteries.items, nouvelItem].sort((a, b) => capaciteAh(a.label) - capaciteAh(b.label));
-        return { ...s, batteries: { ...s.batteries, items } };
-      }
-      const nouvelItem = { id: uid(), label: "Nouvel article", prix: 0 };
-      return { ...s, [familleKey]: { ...s[familleKey], items: [...s[familleKey].items, nouvelItem] } };
+      const nouvelItem =
+        familleKey === "batteries" ? { id: uid(), label: "Nouvelle capacité", prixAchat: 0, coef: 2, prix: 0 } : { id: uid(), label: "Nouvel article", prix: 0 };
+      const items = trierParLabel([...s[familleKey].items, nouvelItem]);
+      return { ...s, [familleKey]: { ...s[familleKey], items } };
     });
   const supprimerLigneCatalogueDirect = (familleKey, itemId) =>
     setCatalogueDirect((s) => ({ ...s, [familleKey]: { ...s[familleKey], items: s[familleKey].items.filter((it) => it.id !== itemId) } }));
   const renommerLigneCatalogueDirect = (familleKey, itemId, label) =>
-    setCatalogueDirect((s) => ({ ...s, [familleKey]: { ...s[familleKey], items: s[familleKey].items.map((it) => (it.id === itemId ? { ...it, label } : it)) } }));
+    setCatalogueDirect((s) => {
+      const items = trierParLabel(s[familleKey].items.map((it) => (it.id === itemId ? { ...it, label } : it)));
+      return { ...s, [familleKey]: { ...s[familleKey], items } };
+    });
 
   // FirePro — ajout/suppression/renommage des générateurs
   const ajouterGenerateurFirePro = () =>
     setFireproGenerateurs((arr) => [...arr, { id: uid(), code: "", label: "Nouveau générateur", masse: 0, prix: 0 }]);
   const supprimerGenerateurFirePro = (id) => setFireproGenerateurs((arr) => arr.filter((g) => g.id !== id));
   const renommerGenerateurFirePro = (id, label) => setFireproGenerateurs((arr) => arr.map((g) => (g.id === id ? { ...g, label } : g)));
+  const majMasseGenerateurFirePro = (id, masse) =>
+    setFireproGenerateurs((arr) => [...arr.map((g) => (g.id === id ? { ...g, masse } : g))].sort((a, b) => a.masse - b.masse));
 
   // FirePro — ajout/suppression/renommage des accessoires (par famille)
   const ajouterAccessoireFirePro = (famId) =>
-    setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: [...s[famId].items, { id: uid(), code: "", label: "Nouvel article", prix: 0 }] } }));
+    setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: trierParLabel([...s[famId].items, { id: uid(), code: "", label: "Nouvel article", prix: 0 }]) } }));
   const supprimerAccessoireFirePro = (famId, itemId) =>
     setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: s[famId].items.filter((it) => it.id !== itemId) } }));
   const renommerAccessoireFirePro = (famId, itemId, label) =>
-    setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: s[famId].items.map((it) => (it.id === itemId ? { ...it, label } : it)) } }));
+    setFireproAccessoires((s) => ({ ...s, [famId]: { ...s[famId], items: trierParLabel(s[famId].items.map((it) => (it.id === itemId ? { ...it, label } : it))) } }));
 
   // Contenu vierge d'un chiffrage — les tarifs/catalogues (ci-dessus) restent
   // partagés entre tous les chiffrages, seuls affaire/postes/lignes sont propres
@@ -2745,7 +2752,7 @@ export default function ChiffrageHTMaintenance() {
                       <div style={{ gridColumn: "span 2" }}>
                         <TextField value={g.label} onChange={(v) => renommerGenerateurFirePro(g.id, v)} />
                       </div>
-                      <NumberField value={g.masse} onChange={(v) => setFireproGenerateurs((arr) => arr.map((x, j) => (j === i ? { ...x, masse: v } : x)))} width="100%" />
+                      <NumberField value={g.masse} onChange={(v) => majMasseGenerateurFirePro(g.id, v)} width="100%" />
                       <NumberField value={g.prix} onChange={(v) => setFireproGenerateurs((arr) => arr.map((x, j) => (j === i ? { ...x, prix: v } : x)))} suffix="€" width="100%" />
                       <button onClick={() => supprimerGenerateurFirePro(g.id)} style={{ color: "#B0473E" }} className="flex justify-end">
                         <Trash2 size={14} />
