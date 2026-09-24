@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Plus, Trash2, Settings2, FileText, ClipboardList, Zap, Download, Copy, Flame } from "lucide-react";
+import { Plus, Trash2, Settings2, FileText, ClipboardList, Download, Copy, Flame } from "lucide-react";
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
 import { doc, getDoc, setDoc, collection, getDocs, addDoc, deleteDoc } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
@@ -1672,9 +1672,7 @@ export default function ChiffrageHTMaintenance() {
           {authChecked && (
             <>
               <div className="flex items-center gap-3 mb-5">
-                <div style={{ background: AMBER, width: 34, height: 34, borderRadius: 8 }} className="flex items-center justify-center shrink-0">
-                  <Zap size={18} color={INK} strokeWidth={2.5} />
-                </div>
+                <img src="/logo-ht-maintenance.png" alt="HT Maintenance" style={{ width: 34, height: 34, borderRadius: 8 }} className="shrink-0" />
                 <div>
                   <div style={{ color: INK, fontWeight: 700, fontSize: 16 }}>HT Maintenance</div>
                   <div style={{ color: MUTED, fontSize: 12 }}>Outil de chiffrage — accès protégé</div>
@@ -1717,9 +1715,7 @@ export default function ChiffrageHTMaintenance() {
       <div style={{ background: INK }} className="px-4 md:px-6 py-4 md:py-5">
         <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3">
-            <div style={{ background: AMBER, width: 34, height: 34, borderRadius: 8 }} className="flex items-center justify-center shrink-0">
-              <Zap size={18} color={INK} strokeWidth={2.5} />
-            </div>
+            <img src="/logo-ht-maintenance.png" alt="HT Maintenance" style={{ width: 34, height: 34, borderRadius: 8 }} className="shrink-0" />
             <div>
               <div style={{ color: "#fff", fontWeight: 700, fontSize: 16, letterSpacing: 0.2 }}>HT Maintenance</div>
               <div style={{ color: "#9AA6B2", fontSize: 12 }} className="hidden sm:block">Outil de chiffrage — HTA / BT</div>
