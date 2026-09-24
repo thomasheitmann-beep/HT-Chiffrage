@@ -21,6 +21,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const STORAGE_KEY = "ht-chiffrage-maintenance-v1";
 const FIRESTORE_DOC = "ht-chiffrage/etat";
 const DEVIS_COLLECTION = "ht-chiffrage-devis";
+const FIREPRO_DEVIS_COLLECTION = "ht-chiffrage-firepro-devis";
 
 // ---------------------------------------------------------------------------
 // Catalogue repris du tableau réel "Niv 1-4 (standard)" du fichier
@@ -703,22 +704,42 @@ export default function ChiffrageHTMaintenance() {
       },
       postesEquipement: [nouveauPosteEquipement(1)],
       lignesLibres: [],
+    };
+  }
+
+  // Contenu vierge d'un devis FirePro — totalement indépendant du devis
+  // HT/BT (référence, client, site, locaux propres).
+  function devisFireProVierge() {
+    return {
+      fireproAffaire: {
+        client: "",
+        site: "",
+        reference: "FIR-" + new Date().getFullYear() + "-001",
+      },
       zonesFirePro: [nouvelleZoneFirePro(1)],
+      fireproCoefAjustement: 1,
     };
   }
 
   const [affaire, setAffaire] = useState(saved.affaire || devisVierge().affaire);
   const [postesEquipement, setPostesEquipement] = useState(saved.postesEquipement || devisVierge().postesEquipement);
   const [lignesLibres, setLignesLibres] = useState(saved.lignesLibres || []);
-  const [zonesFirePro, setZonesFirePro] = useState(saved.zonesFirePro || devisVierge().zonesFirePro);
   const [nbAAjouter, setNbAAjouter] = useState(1);
 
-  // Paramètres FirePro — partagés entre chiffrages, comme tarifs/catalogues.
+  // Paramètres FirePro — partagés entre TOUS les devis (HT/BT et FirePro), comme tarifs/catalogues.
   const [fireproClasses, setFireproClasses] = useState(saved.fireproClasses || DEFAULT_FIREPRO_CLASSES);
   const [fireproConfinement, setFireproConfinement] = useState(saved.fireproConfinement || DEFAULT_FIREPRO_CONFINEMENT);
   const [fireproGenerateurs, setFireproGenerateurs] = useState(saved.fireproGenerateurs || DEFAULT_FIREPRO_GENERATEURS);
   const [fireproAccessoires, setFireproAccessoires] = useState(saved.fireproAccessoires || DEFAULT_FIREPRO_ACCESSOIRES);
+
+  // Devis FirePro courant — totalement indépendant du devis HT/BT (sa propre
+  // liste, son propre sélecteur, sa propre référence FIR-...).
+  const [fireproAffaire, setFireproAffaire] = useState(saved.fireproAffaire || devisFireProVierge().fireproAffaire);
+  const [zonesFirePro, setZonesFirePro] = useState(saved.zonesFirePro || devisFireProVierge().zonesFirePro);
   const [fireproCoefAjustement, setFireproCoefAjustement] = useState(saved.fireproCoefAjustement ?? 1);
+  const [fireproDevisList, setFireproDevisList] = useState(saved.fireproDevisList || []);
+  const [currentFireproDevisId, setCurrentFireproDevisId] = useState(saved.currentFireproDevisId || null);
+  const [fireproDevisReady, setFireproDevisReady] = useState(false);
 
   const addZoneFirePro = () => setZonesFirePro((zs) => [...zs, nouvelleZoneFirePro(zs.length + 1)]);
   const dupliquerZoneFirePro = (id) =>
@@ -852,8 +873,6 @@ export default function ChiffrageHTMaintenance() {
         setAffaire(target.affaire || devisVierge().affaire);
         setPostesEquipement(target.postesEquipement || devisVierge().postesEquipement);
         setLignesLibres(target.lignesLibres || []);
-        setZonesFirePro(target.zonesFirePro || devisVierge().zonesFirePro);
-        setFireproCoefAjustement(target.fireproCoefAjustement ?? 1);
         setDevisReady(true);
       })
       .catch(() => setSyncState("error"));
@@ -871,8 +890,6 @@ export default function ChiffrageHTMaintenance() {
           setAffaire(data.affaire || devisVierge().affaire);
           setPostesEquipement(data.postesEquipement || devisVierge().postesEquipement);
           setLignesLibres(data.lignesLibres || []);
-          setZonesFirePro(data.zonesFirePro || devisVierge().zonesFirePro);
-          setFireproCoefAjustement(data.fireproCoefAjustement ?? 1);
         }
         setDevisReady(true);
       })
@@ -883,15 +900,13 @@ export default function ChiffrageHTMaintenance() {
     const blank = devisVierge();
     setDevisReady(false);
     try {
-      const payload = { ...blank, fireproCoefAjustement: 1, updatedAt: Date.now() };
+      const payload = { ...blank, updatedAt: Date.now() };
       const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
       setDevisList((l) => [{ id: ref.id, reference: blank.affaire.reference, client: "", updatedAt: payload.updatedAt }, ...l]);
       setCurrentDevisId(ref.id);
       setAffaire(blank.affaire);
       setPostesEquipement(blank.postesEquipement);
       setLignesLibres(blank.lignesLibres);
-      setZonesFirePro(blank.zonesFirePro);
-      setFireproCoefAjustement(1);
     } finally {
       setDevisReady(true);
     }
@@ -904,8 +919,6 @@ export default function ChiffrageHTMaintenance() {
         affaire: { ...affaire, reference: affaire.reference + " (copie)" },
         postesEquipement: postesEquipement.map((p) => ({ ...p, quantites: { ...p.quantites } })),
         lignesLibres: lignesLibres.map((l) => ({ ...l })),
-        zonesFirePro: zonesFirePro.map((z) => ({ ...z, generateurs: { ...z.generateurs }, accessoires: { ...z.accessoires } })),
-        fireproCoefAjustement,
         updatedAt: Date.now(),
       };
       const ref = await addDoc(collection(db, DEVIS_COLLECTION), payload);
@@ -914,11 +927,100 @@ export default function ChiffrageHTMaintenance() {
       setAffaire(payload.affaire);
       setPostesEquipement(payload.postesEquipement);
       setLignesLibres(payload.lignesLibres);
-      setZonesFirePro(payload.zonesFirePro);
-      setFireproCoefAjustement(payload.fireproCoefAjustement);
     } finally {
       setDevisReady(true);
     }
+  };
+
+  // ---- Devis FirePro (totalement indépendant du devis HT/BT ci-dessus) ----
+  useEffect(() => {
+    if (!authReady) return;
+    getDocs(collection(db, FIREPRO_DEVIS_COLLECTION))
+      .then(async (snap) => {
+        let list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        if (list.length === 0) {
+          const blank = devisFireProVierge();
+          const payload = { ...blank, updatedAt: Date.now() };
+          const ref = await addDoc(collection(db, FIREPRO_DEVIS_COLLECTION), payload);
+          list = [{ id: ref.id, ...payload }];
+        }
+        setFireproDevisList(list.map((d) => ({ id: d.id, reference: d.fireproAffaire?.reference, client: d.fireproAffaire?.client, updatedAt: d.updatedAt })));
+        const target = list.find((d) => d.id === currentFireproDevisId) || list[0];
+        setCurrentFireproDevisId(target.id);
+        setFireproAffaire(target.fireproAffaire || devisFireProVierge().fireproAffaire);
+        setZonesFirePro(target.zonesFirePro || devisFireProVierge().zonesFirePro);
+        setFireproCoefAjustement(target.fireproCoefAjustement ?? 1);
+        setFireproDevisReady(true);
+      })
+      .catch(() => setSyncState("error"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady]);
+
+  const chargerDevisFirePro = (id) => {
+    setFireproDevisReady(false);
+    getDoc(doc(db, FIREPRO_DEVIS_COLLECTION, id))
+      .then((snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          setCurrentFireproDevisId(id);
+          setFireproAffaire(data.fireproAffaire || devisFireProVierge().fireproAffaire);
+          setZonesFirePro(data.zonesFirePro || devisFireProVierge().zonesFirePro);
+          setFireproCoefAjustement(data.fireproCoefAjustement ?? 1);
+        }
+        setFireproDevisReady(true);
+      })
+      .catch(() => setFireproDevisReady(true));
+  };
+
+  const nouveauChiffrageFirePro = async () => {
+    const blank = devisFireProVierge();
+    setFireproDevisReady(false);
+    try {
+      const payload = { ...blank, updatedAt: Date.now() };
+      const ref = await addDoc(collection(db, FIREPRO_DEVIS_COLLECTION), payload);
+      setFireproDevisList((l) => [{ id: ref.id, reference: blank.fireproAffaire.reference, client: "", updatedAt: payload.updatedAt }, ...l]);
+      setCurrentFireproDevisId(ref.id);
+      setFireproAffaire(blank.fireproAffaire);
+      setZonesFirePro(blank.zonesFirePro);
+      setFireproCoefAjustement(1);
+    } finally {
+      setFireproDevisReady(true);
+    }
+  };
+
+  const dupliquerChiffrageFirePro = async () => {
+    setFireproDevisReady(false);
+    try {
+      const payload = {
+        fireproAffaire: { ...fireproAffaire, reference: fireproAffaire.reference + " (copie)" },
+        zonesFirePro: zonesFirePro.map((z) => ({ ...z, generateurs: { ...z.generateurs }, accessoires: { ...z.accessoires } })),
+        fireproCoefAjustement,
+        updatedAt: Date.now(),
+      };
+      const ref = await addDoc(collection(db, FIREPRO_DEVIS_COLLECTION), payload);
+      setFireproDevisList((l) => [{ id: ref.id, reference: payload.fireproAffaire.reference, client: payload.fireproAffaire.client, updatedAt: payload.updatedAt }, ...l]);
+      setCurrentFireproDevisId(ref.id);
+      setFireproAffaire(payload.fireproAffaire);
+      setZonesFirePro(payload.zonesFirePro);
+      setFireproCoefAjustement(payload.fireproCoefAjustement);
+    } finally {
+      setFireproDevisReady(true);
+    }
+  };
+
+  const supprimerChiffrageFirePro = async () => {
+    if (fireproDevisList.length <= 1) return;
+    if (!window.confirm(`Supprimer définitivement le devis FirePro « ${fireproAffaire.reference} » ? Cette action est irréversible.`)) return;
+    const idASupprimer = currentFireproDevisId;
+    try {
+      await deleteDoc(doc(db, FIREPRO_DEVIS_COLLECTION, idASupprimer));
+    } catch {
+      // on continue quand même côté interface
+    }
+    const reste = fireproDevisList.filter((d) => d.id !== idASupprimer);
+    setFireproDevisList(reste);
+    chargerDevisFirePro(reste[0].id);
   };
 
   const supprimerChiffrage = async () => {
@@ -981,7 +1083,7 @@ export default function ChiffrageHTMaintenance() {
     if (!authReady || !devisReady || !currentDevisId) return;
     setSyncState("syncing");
     const t = setTimeout(() => {
-      const payload = { affaire, postesEquipement, lignesLibres, zonesFirePro, fireproCoefAjustement, updatedAt: Date.now() };
+      const payload = { affaire, postesEquipement, lignesLibres, updatedAt: Date.now() };
       setDoc(doc(db, DEVIS_COLLECTION, currentDevisId), payload)
         .then(() => {
           setSyncState("synced");
@@ -990,7 +1092,25 @@ export default function ChiffrageHTMaintenance() {
         .catch(() => setSyncState("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [authReady, devisReady, currentDevisId, affaire, postesEquipement, lignesLibres, zonesFirePro, fireproCoefAjustement]);
+  }, [authReady, devisReady, currentDevisId, affaire, postesEquipement, lignesLibres]);
+
+  // Enregistre automatiquement le devis FirePro courant, indépendamment du devis HT/BT.
+  useEffect(() => {
+    if (!authReady || !fireproDevisReady || !currentFireproDevisId) return;
+    setSyncState("syncing");
+    const t = setTimeout(() => {
+      const payload = { fireproAffaire, zonesFirePro, fireproCoefAjustement, updatedAt: Date.now() };
+      setDoc(doc(db, FIREPRO_DEVIS_COLLECTION, currentFireproDevisId), payload)
+        .then(() => {
+          setSyncState("synced");
+          setFireproDevisList((l) =>
+            l.map((d) => (d.id === currentFireproDevisId ? { ...d, reference: fireproAffaire.reference, client: fireproAffaire.client, updatedAt: payload.updatedAt } : d))
+          );
+        })
+        .catch(() => setSyncState("error"));
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [authReady, fireproDevisReady, currentFireproDevisId, fireproAffaire, zonesFirePro, fireproCoefAjustement]);
 
   // Cache local (rechargement rapide avant que le cloud ne réponde)
   useEffect(() => {
@@ -1012,6 +1132,9 @@ export default function ChiffrageHTMaintenance() {
           devisList,
           currentDevisId,
           zonesFirePro,
+          fireproAffaire,
+          fireproDevisList,
+          currentFireproDevisId,
           fireproClasses,
           fireproConfinement,
           fireproGenerateurs,
@@ -1037,6 +1160,9 @@ export default function ChiffrageHTMaintenance() {
     devisList,
     currentDevisId,
     zonesFirePro,
+    fireproAffaire,
+    fireproDevisList,
+    currentFireproDevisId,
     fireproClasses,
     fireproConfinement,
     fireproGenerateurs,
@@ -1096,20 +1222,18 @@ export default function ChiffrageHTMaintenance() {
   // les lignes libres pour repartir sur un devis neuf. Ne touche pas aux
   // tarifs/catalogues de Paramètres.
   const razChiffrage = () => {
-    if (!window.confirm("Remettre à zéro le chiffrage en cours (infos affaire, équipements saisis, lignes libres, zones FirePro) ? Cette action est irréversible.")) return;
+    if (!window.confirm("Remettre à zéro le chiffrage en cours (infos affaire, équipements saisis, lignes libres) ? Cette action est irréversible.")) return;
     const blank = devisVierge();
     setAffaire(blank.affaire);
     setPostesEquipement(blank.postesEquipement);
     setLignesLibres(blank.lignesLibres);
-    setZonesFirePro(blank.zonesFirePro);
-    setFireproCoefAjustement(1);
   };
 
-  // RAZ FirePro seul : vide les locaux FirePro sans toucher au chiffrage HT/BT
-  // (affaire, postes, lignes libres) du même devis.
+  // RAZ FirePro seul : vide les locaux du devis FirePro courant, sans toucher
+  // au devis HT/BT (totalement indépendant).
   const razFirePro = () => {
-    if (!window.confirm("Remettre à zéro les locaux FirePro de ce chiffrage ? Cette action est irréversible.")) return;
-    setZonesFirePro(devisVierge().zonesFirePro);
+    if (!window.confirm("Remettre à zéro les locaux de ce devis FirePro ? Cette action est irréversible.")) return;
+    setZonesFirePro(devisFireProVierge().zonesFirePro);
     setFireproCoefAjustement(1);
   };
 
@@ -1395,9 +1519,9 @@ export default function ChiffrageHTMaintenance() {
       width: { size: PAGE_WIDTH, type: WidthType.DXA },
       columnWidths: infoW,
       rows: [
-        ["Référence", affaire.reference || "—"],
-        ["Client", affaire.client || "—"],
-        ["Site", affaire.site || "—"],
+        ["Référence", fireproAffaire.reference || "—"],
+        ["Client", fireproAffaire.client || "—"],
+        ["Site", fireproAffaire.site || "—"],
         ["Date", dateStr],
       ].map(
         ([label, value]) =>
@@ -1501,7 +1625,7 @@ export default function ChiffrageHTMaintenance() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `FirePro_${(affaire.reference || "HT-Maintenance").replace(/[^a-zA-Z0-9_-]/g, "_")}.docx`;
+    a.download = `FirePro_${(fireproAffaire.reference || "FirePro").replace(/[^a-zA-Z0-9_-]/g, "_")}.docx`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -2046,17 +2170,159 @@ export default function ChiffrageHTMaintenance() {
               </table>
               </div>
             </SectionCard>
+
+            <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="p-4 mt-2 flex flex-wrap items-center gap-3 justify-between">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span style={{ fontSize: 11, color: MUTED }}>Devis FirePro</span>
+                <Select
+                  value={currentFireproDevisId || ""}
+                  onChange={(id) => chargerDevisFirePro(id)}
+                  options={fireproDevisList.map((d) => ({ value: d.id, label: `${d.reference || "Sans référence"}${d.client ? " — " + d.client : ""}` }))}
+                  style={{ minWidth: 240, width: "auto" }}
+                />
+              </div>
+              <button onClick={exportFireProWord} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                <Download size={15} /> Exporter en Word (FirePro)
+              </button>
+            </div>
+
+            {zonesFireProCalc.map(({ zone, montantTotal }) => {
+              const lignesGen = fireproGenerateurs.map((g) => ({ id: g.id, label: g.label, qte: zone.generateurs[g.id] || 0, prix: g.prix })).filter((l) => l.qte > 0);
+              const lignesAcc = [];
+              Object.entries(fireproAccessoires).forEach(([famId, fam]) => {
+                fam.items.forEach((item) => {
+                  const qte = zone.accessoires[item.id] || 0;
+                  if (qte > 0) lignesAcc.push({ id: `${famId}-${item.id}`, label: item.label, qte, prix: item.prix });
+                });
+              });
+              const toutesLignes = [...lignesGen, ...lignesAcc];
+              return (
+                <SectionCard key={zone.id} title={zone.nom} subtitle={`${toutesLignes.length} élément${toutesLignes.length > 1 ? "s" : ""} sélectionné${toutesLignes.length > 1 ? "s" : ""}`} icon={Flame}>
+                  <div className="overflow-x-auto">
+                    <table className="w-full" style={{ fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ color: MUTED, textAlign: "left" }}>
+                          <th className="pb-2 font-medium">Désignation</th>
+                          <th className="pb-2 font-medium text-right">Prix unitaire</th>
+                          <th className="pb-2 font-medium text-right">Qté</th>
+                          <th className="pb-2 font-medium text-right">Montant HT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {toutesLignes.map((l) => (
+                          <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
+                            <td className="py-1.5" style={{ color: INK }}>{l.label}</td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{euros(l.prix)}</td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{l.qte}</td>
+                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{euros(l.prix * l.qte)}</td>
+                          </tr>
+                        ))}
+                        {toutesLignes.length === 0 && (
+                          <tr>
+                            <td colSpan={4} className="py-4 text-center" style={{ color: MUTED }}>Aucun élément sélectionné.</td>
+                          </tr>
+                        )}
+                        <tr style={{ borderTop: `2px solid ${INK}` }}>
+                          <td className="pt-2" style={{ fontWeight: 700, color: INK }} colSpan={3}>Sous-total {zone.nom}</td>
+                          <td className="pt-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(montantTotal)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </SectionCard>
+              );
+            })}
+
+            <SectionCard title="Récapitulatif FirePro" icon={FileText}>
+              <div className="overflow-x-auto">
+                <table className="w-full" style={{ fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ color: MUTED, textAlign: "left" }}>
+                      <th className="pb-2 font-medium">Local</th>
+                      <th className="pb-2 font-medium text-right">Masse nécess.</th>
+                      <th className="pb-2 font-medium text-right">Masse effective</th>
+                      <th className="pb-2 font-medium text-right">Montant HT</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {zonesFireProCalc.map(({ zone, masseNecessaire, masseEffective, montantTotal, suffisant }) => (
+                      <tr key={zone.id} style={{ borderTop: `1px solid ${LINE}` }}>
+                        <td className="py-2" style={{ color: INK }}>
+                          {zone.nom} {!suffisant && <span style={{ color: "#B0473E", fontSize: 11.5 }}>(insuffisant)</span>}
+                        </td>
+                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{Math.round(masseNecessaire)} g</td>
+                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{Math.round(masseEffective)} g</td>
+                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{euros(montantTotal)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-col gap-2.5 mt-5" style={{ fontSize: 13.5 }}>
+                <div className="flex items-center justify-between">
+                  <span style={{ color: INK }}>Montant HT avant coefficient</span>
+                  <span style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalFireProAvantCoef)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span style={{ color: INK }}>Coefficient d'ajustement</span>
+                  <NumberField value={fireproCoefAjustement} onChange={setFireproCoefAjustement} suffix="×" width={90} />
+                </div>
+                <div style={{ borderTop: `2px solid ${INK}`, marginTop: 6, paddingTop: 12 }} className="flex items-center justify-between">
+                  <span style={{ fontWeight: 700, color: INK, fontSize: 16 }}>TOTAL HT FIREPRO</span>
+                  <span style={{ fontWeight: 800, color: INK, fontSize: 24, fontVariantNumeric: "tabular-nums" }}>{euros(totalFirePro)}</span>
+                </div>
+              </div>
+            </SectionCard>
           </>
         )}
 
         {/* ---------------- ONGLET FIREPRO ---------------- */}
         {tab === "firepro" && (
           <>
-            <div className="flex justify-end">
-              <button onClick={razFirePro} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: "#B0473E" }}>
-                <Trash2 size={14} /> RAZ FirePro
-              </button>
+            <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 10 }} className="p-4 flex flex-wrap items-center gap-3 justify-between">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span style={{ fontSize: 11, color: MUTED }}>FirePro</span>
+                <Select
+                  value={currentFireproDevisId || ""}
+                  onChange={(id) => chargerDevisFirePro(id)}
+                  options={fireproDevisList.map((d) => ({ value: d.id, label: `${d.reference || "Sans référence"}${d.client ? " — " + d.client : ""}` }))}
+                  style={{ minWidth: 240, width: "auto" }}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={nouveauChiffrageFirePro} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                  <Plus size={15} /> Nouveau
+                </button>
+                <button onClick={dupliquerChiffrageFirePro} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: INK_2 }}>
+                  <Copy size={14} /> Dupliquer
+                </button>
+                {fireproDevisList.length > 1 && (
+                  <button onClick={supprimerChiffrageFirePro} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: "#B0473E" }}>
+                    <Trash2 size={14} /> Supprimer
+                  </button>
+                )}
+                <button onClick={razFirePro} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: "#B0473E" }}>
+                  <Trash2 size={14} /> RAZ
+                </button>
+              </div>
             </div>
+
+            <SectionCard title="Informations de l'affaire FirePro" icon={FileText}>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Référence</label>
+                  <TextField value={fireproAffaire.reference} onChange={(v) => setFireproAffaire((a) => ({ ...a, reference: v }))} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Client</label>
+                  <TextField value={fireproAffaire.client} onChange={(v) => setFireproAffaire((a) => ({ ...a, client: v }))} placeholder="Nom du client" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Site</label>
+                  <TextField value={fireproAffaire.site} onChange={(v) => setFireproAffaire((a) => ({ ...a, site: v }))} placeholder="Site / adresse" />
+                </div>
+              </div>
+            </SectionCard>
 
             {zonesFireProCalc.map(({ zone, volume, masseNecessaire, masseEffective, montantTotal, suffisant }, index) => (
               <SectionCard
@@ -2201,102 +2467,6 @@ export default function ChiffrageHTMaintenance() {
             >
               <Plus size={16} /> Ajouter un local
             </button>
-
-            {zonesFireProCalc.map(({ zone, montantTotal }) => {
-              const lignesGen = fireproGenerateurs.map((g) => ({ id: g.id, label: g.label, qte: zone.generateurs[g.id] || 0, prix: g.prix })).filter((l) => l.qte > 0);
-              const lignesAcc = [];
-              Object.entries(fireproAccessoires).forEach(([famId, fam]) => {
-                fam.items.forEach((item) => {
-                  const qte = zone.accessoires[item.id] || 0;
-                  if (qte > 0) lignesAcc.push({ id: `${famId}-${item.id}`, label: item.label, qte, prix: item.prix });
-                });
-              });
-              const toutesLignes = [...lignesGen, ...lignesAcc];
-              return (
-                <SectionCard key={zone.id} title={zone.nom} subtitle={`${toutesLignes.length} élément${toutesLignes.length > 1 ? "s" : ""} sélectionné${toutesLignes.length > 1 ? "s" : ""}`} icon={Flame}>
-                  <div className="overflow-x-auto">
-                    <table className="w-full" style={{ fontSize: 13 }}>
-                      <thead>
-                        <tr style={{ color: MUTED, textAlign: "left" }}>
-                          <th className="pb-2 font-medium">Désignation</th>
-                          <th className="pb-2 font-medium text-right">Prix unitaire</th>
-                          <th className="pb-2 font-medium text-right">Qté</th>
-                          <th className="pb-2 font-medium text-right">Montant HT</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {toutesLignes.map((l) => (
-                          <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
-                            <td className="py-1.5" style={{ color: INK }}>{l.label}</td>
-                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{euros(l.prix)}</td>
-                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{l.qte}</td>
-                            <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{euros(l.prix * l.qte)}</td>
-                          </tr>
-                        ))}
-                        {toutesLignes.length === 0 && (
-                          <tr>
-                            <td colSpan={4} className="py-4 text-center" style={{ color: MUTED }}>Aucun élément sélectionné.</td>
-                          </tr>
-                        )}
-                        <tr style={{ borderTop: `2px solid ${INK}` }}>
-                          <td className="pt-2" style={{ fontWeight: 700, color: INK }} colSpan={3}>Sous-total {zone.nom}</td>
-                          <td className="pt-2 text-right" style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(montantTotal)}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </SectionCard>
-              );
-            })}
-
-            <SectionCard
-              title="Récapitulatif FirePro"
-              icon={FileText}
-              right={
-                <button onClick={exportFireProWord} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
-                  <Download size={15} /> Exporter en Word
-                </button>
-              }
-            >
-              <div className="overflow-x-auto">
-                <table className="w-full" style={{ fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ color: MUTED, textAlign: "left" }}>
-                      <th className="pb-2 font-medium">Local</th>
-                      <th className="pb-2 font-medium text-right">Masse nécess.</th>
-                      <th className="pb-2 font-medium text-right">Masse effective</th>
-                      <th className="pb-2 font-medium text-right">Montant HT</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {zonesFireProCalc.map(({ zone, masseNecessaire, masseEffective, montantTotal, suffisant }) => (
-                      <tr key={zone.id} style={{ borderTop: `1px solid ${LINE}` }}>
-                        <td className="py-2" style={{ color: INK }}>
-                          {zone.nom} {!suffisant && <span style={{ color: "#B0473E", fontSize: 11.5 }}>(insuffisant)</span>}
-                        </td>
-                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{Math.round(masseNecessaire)} g</td>
-                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{Math.round(masseEffective)} g</td>
-                        <td className="py-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>{euros(montantTotal)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div className="flex flex-col gap-2.5 mt-5" style={{ fontSize: 13.5 }}>
-                <div className="flex items-center justify-between">
-                  <span style={{ color: INK }}>Montant HT avant coefficient</span>
-                  <span style={{ fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(totalFireProAvantCoef)}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span style={{ color: INK }}>Coefficient d'ajustement</span>
-                  <NumberField value={fireproCoefAjustement} onChange={setFireproCoefAjustement} suffix="×" width={90} />
-                </div>
-                <div style={{ borderTop: `2px solid ${INK}`, marginTop: 6, paddingTop: 12 }} className="flex items-center justify-between">
-                  <span style={{ fontWeight: 700, color: INK, fontSize: 16 }}>TOTAL HT FIREPRO</span>
-                  <span style={{ fontWeight: 800, color: INK, fontSize: 24, fontVariantNumeric: "tabular-nums" }}>{euros(totalFirePro)}</span>
-                </div>
-              </div>
-            </SectionCard>
           </>
         )}
 
