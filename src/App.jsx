@@ -439,6 +439,17 @@ function euros(n) {
   return n.toLocaleString("fr-FR", { maximumFractionDigits: 0 }) + " €";
 }
 
+// Extrait le premier nombre trouvé dans un libellé (ex. "45 Ah" -> 45, "60°C"
+// -> 60) pour trier les catalogues par ordre croissant. Renvoie Infinity si
+// aucun nombre n'est trouvé (l'élément reste en fin de liste).
+function extraireNombreLabel(label) {
+  const m = String(label).match(/[\d.,]+/);
+  return m ? parseFloat(m[0].replace(",", ".")) : Infinity;
+}
+function trierParLabel(items) {
+  return [...items].sort((a, b) => extraireNombreLabel(a.label) - extraireNombreLabel(b.label));
+}
+
 function findCoefCategory(catalogue, valeur) {
   // c.max peut valoir null si une ancienne sauvegarde a transformé Infinity
   // en null (JSON ne sait pas encoder Infinity) — on le traite alors comme
@@ -644,6 +655,7 @@ export default function ChiffrageHTMaintenance() {
     if (!base.batteries || !base.batteries.items || base.batteries.items[0]?.prixAchat == null) {
       base.batteries = DEFAULT_CATALOGUE_DIRECT.batteries;
     }
+    base.batteries = { ...base.batteries, items: trierParLabel(base.batteries.items) };
     return base;
   };
 
@@ -660,11 +672,6 @@ export default function ChiffrageHTMaintenance() {
   // Extrait le premier nombre trouvé dans un libellé (ex. "45 Ah" -> 45,
   // "60°C" -> 60) pour trier les catalogues par ordre croissant. Renvoie
   // Infinity si aucun nombre n'est trouvé (l'élément reste en fin de liste).
-  const extraireNombreLabel = (label) => {
-    const m = String(label).match(/[\d.,]+/);
-    return m ? parseFloat(m[0].replace(",", ".")) : Infinity;
-  };
-  const trierParLabel = (items) => [...items].sort((a, b) => extraireNombreLabel(a.label) - extraireNombreLabel(b.label));
 
   const ajouterLigneCatalogueDirect = (familleKey) =>
     setCatalogueDirect((s) => {
