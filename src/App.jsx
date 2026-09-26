@@ -1425,13 +1425,13 @@ export default function ChiffrageHTMaintenance() {
     );
     const infoTable = new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: infoW, rows: infoRows });
 
-    // --- Tableau détail équipements (5 colonnes) ---
-    const equipW = colWidths([28, 15, 22, 10, 25]);
+    // --- Tableau détail équipements (6 colonnes) ---
+    const equipW = colWidths([24, 13, 17, 15, 9, 22]);
     const headerCell = (text, i) =>
       new TableCell({ width: { size: equipW[i], type: WidthType.DXA }, shading: { type: ShadingType.SOLID, fill: "1B2733" }, children: [para(text, { bold: true, color: "FFFFFF" })] });
     const dataCell = (text, i, opts = {}) => new TableCell({ width: { size: equipW[i], type: WidthType.DXA }, children: [para(text, opts)] });
 
-    const equipHeader = new TableRow({ children: ["Désignation", "Poste", "Famille", "Qté", "Montant HT"].map(headerCell) });
+    const equipHeader = new TableRow({ children: ["Désignation", "Poste", "Famille", "Niveau", "Qté", "Montant HT"].map(headerCell) });
     const equipDataRows = [
       ...lignesCatalogue.map(
         (l) =>
@@ -1440,8 +1440,9 @@ export default function ChiffrageHTMaintenance() {
               dataCell(l.label, 0),
               dataCell(l.posteNom, 1),
               dataCell(LABEL_FAMILLE[l.famille] || l.famille, 2),
-              dataCell(l.qte, 3, { right: true }),
-              dataCell(euros(l.montant), 4, { right: true }),
+              dataCell(l.niveau ? NIVEAUX_PRESTATION[l.niveau] : "—", 3),
+              dataCell(l.qte, 4, { right: true }),
+              dataCell(euros(l.montant), 5, { right: true }),
             ],
           })
       ),
@@ -1452,14 +1453,15 @@ export default function ChiffrageHTMaintenance() {
               dataCell(l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille], 0),
               dataCell("—", 1),
               dataCell(LABEL_FAMILLE[l.famille] || l.famille, 2),
-              dataCell(l.quantite, 3, { right: true }),
-              dataCell(euros(montant), 4, { right: true }),
+              dataCell("—", 3),
+              dataCell(l.quantite, 4, { right: true }),
+              dataCell(euros(montant), 5, { right: true }),
             ],
           })
       ),
     ];
     if (equipDataRows.length === 0) {
-      equipDataRows.push(new TableRow({ children: [new TableCell({ columnSpan: 5, children: [para("Aucun équipement renseigné")] })] }));
+      equipDataRows.push(new TableRow({ children: [new TableCell({ columnSpan: 6, children: [para("Aucun équipement renseigné")] })] }));
     }
     const equipTable = new Table({ width: { size: PAGE_WIDTH, type: WidthType.DXA }, columnWidths: equipW, rows: [equipHeader, ...equipDataRows] });
 
