@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Trash2, Settings2, FileText, ClipboardList, Download, Copy, Flame } from "lucide-react";
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, AlignmentType, WidthType, ShadingType } from "docx";
-import { doc, getDoc, setDoc, collection, getDocs, addDoc, deleteDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, collection, getDocs, addDoc, deleteDoc, writeBatch } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { db, auth } from "./firebase";
 
@@ -22,6 +22,10 @@ const STORAGE_KEY = "ht-chiffrage-maintenance-v1";
 const FIRESTORE_DOC = "ht-chiffrage/etat";
 const DEVIS_COLLECTION = "ht-chiffrage-devis";
 const FIREPRO_DEVIS_COLLECTION = "ht-chiffrage-firepro-devis";
+// Collection racine partagée entre TOUTES les apps HT Maintenance (pas propre
+// à cette app) : un document par contact, même forme et mêmes fonctions que
+// sur les autres apps (devis-facture, consignation...).
+const CONTACTS_COLLECTION = "contacts-ht-maintenance";
 
 // ---------------------------------------------------------------------------
 // Catalogue repris du tableau réel "Niv 1-4 (standard)" du fichier
@@ -342,6 +346,49 @@ const DEFAULT_FIREPRO_ACCESSOIRES = {
     ],
   },
 };
+
+// ---------------------------------------------------------------------------
+// Contacts — base partagée entre toutes les apps HT Maintenance (même projet
+// Firebase). Un document par contact dans "contacts-ht-maintenance" ; modifier
+// un contact ici le modifie partout.
+// ---------------------------------------------------------------------------
+
+async function loadContactsShared() {
+  const snap = await getDocs(collection(db, CONTACTS_COLLECTION));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// Ne réécrit que ce qui a changé (ajouts/modifications/suppressions), par
+// lots de 450 opérations max (limite Firestore : 500 par batch).
+async function syncContactsToShared(newClients, previousClients) {
+  const prevMap = new Map(previousClients.map((c) => [c.id, c]));
+  const newIds = new Set(newClients.map((c) => c.id));
+  const ops = [];
+  newClients.forEach((c) => {
+    const prev = prevMap.get(c.id);
+    if (!prev || JSON.stringify(prev) !== JSON.stringify(c)) ops.push({ type: "set", id: c.id, data: c });
+  });
+  previousClients.forEach((c) => {
+    if (!newIds.has(c.id)) ops.push({ type: "delete", id: c.id });
+  });
+  for (let i = 0; i < ops.length; i += 450) {
+    const batch = writeBatch(db);
+    ops.slice(i, i + 450).forEach((op) => {
+      const ref = doc(db, CONTACTS_COLLECTION, op.id);
+      if (op.type === "set") {
+        const { id, ...data } = op.data;
+        batch.set(ref, data);
+      } else {
+        batch.delete(ref);
+      }
+    });
+    await batch.commit();
+  }
+}
+
+function nouveauContactVierge() {
+  return { id: uid(), societe: "", contact: "", adresse: "", cp: "", ville: "", pays: "", email: "", telephones: [] };
+}
 
 function nouvelleZoneFirePro(n) {
   return {
@@ -793,6 +840,67 @@ export default function ChiffrageHTMaintenance() {
   const [loginError, setLoginError] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
 
+  // Contacts partagés entre toutes les apps HT Maintenance.
+  const [contacts, setContacts] = useState(saved.contacts || []);
+  const [selectedContactId, setSelectedContactId] = useState("");
+  const [editingContact, setEditingContact] = useState(null); // brouillon en cours d'ajout/édition, ou null
+
+  useEffect(() => {
+    if (!authReady) return;
+    loadContactsShared()
+      .then(setContacts)
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady]);
+
+  const choisirContactPourAffaire = (id) => {
+    setSelectedContactId(id);
+    const c = contacts.find((x) => x.id === id);
+    if (c) {
+      setAffaire((a) => ({
+        ...a,
+        client: c.societe || c.contact || a.client,
+        site: [c.adresse, c.cp, c.ville].filter(Boolean).join(", ") || a.site,
+      }));
+    }
+  };
+  const ouvrirNouveauContact = () => setEditingContact(nouveauContactVierge());
+  const ouvrirEditionContact = (id) => {
+    const c = contacts.find((x) => x.id === id);
+    if (c) setEditingContact({ ...c, telephones: (c.telephones || []).map((t) => ({ ...t })) });
+  };
+  const annulerEditionContact = () => setEditingContact(null);
+  const enregistrerContact = async () => {
+    if (!editingContact) return;
+    const existe = contacts.some((c) => c.id === editingContact.id);
+    const prevContacts = contacts;
+    const nextContacts = existe ? contacts.map((c) => (c.id === editingContact.id ? editingContact : c)) : [...contacts, editingContact];
+    setContacts(nextContacts);
+    setSelectedContactId(editingContact.id);
+    setEditingContact(null);
+    try {
+      await syncContactsToShared(nextContacts, prevContacts);
+    } catch {
+      // la base partagée reste à jour au prochain enregistrement réussi
+    }
+  };
+  const supprimerContact = async (id) => {
+    if (!window.confirm("Supprimer ce client de la base partagée (utilisée par toutes vos apps HT Maintenance) ?")) return;
+    const prevContacts = contacts;
+    const nextContacts = contacts.filter((c) => c.id !== id);
+    setContacts(nextContacts);
+    if (selectedContactId === id) setSelectedContactId("");
+    try {
+      await syncContactsToShared(nextContacts, prevContacts);
+    } catch {
+      // la base partagée reste à jour au prochain enregistrement réussi
+    }
+  };
+  const ajouterTelephoneDraft = () => setEditingContact((c) => ({ ...c, telephones: [...(c.telephones || []), { type: "Fixe", numero: "" }] }));
+  const updateTelephoneDraft = (idx, patch) =>
+    setEditingContact((c) => ({ ...c, telephones: c.telephones.map((t, i) => (i === idx ? { ...t, ...patch } : t)) }));
+  const supprimerTelephoneDraft = (idx) => setEditingContact((c) => ({ ...c, telephones: c.telephones.filter((_, i) => i !== idx) }));
+
   // Liste des chiffrages (devis) disponibles, et celui actuellement affiché.
   const [devisList, setDevisList] = useState(saved.devisList || []);
   const [currentDevisId, setCurrentDevisId] = useState(saved.currentDevisId || null);
@@ -1150,6 +1258,7 @@ export default function ChiffrageHTMaintenance() {
           fireproGenerateurs,
           fireproAccessoires,
           fireproCoefAjustement,
+          contacts,
         })
       );
     } catch {
@@ -1177,6 +1286,7 @@ export default function ChiffrageHTMaintenance() {
     fireproGenerateurs,
     fireproAccessoires,
     fireproCoefAjustement,
+    contacts,
   ]);
 
   // Enregistre immédiatement les paramètres/catalogues, sans attendre le
@@ -1823,6 +1933,105 @@ export default function ChiffrageHTMaintenance() {
                   Appliquer la dégressivité volume
                 </label>
               </div>
+            </SectionCard>
+
+            <SectionCard
+              title="Client"
+              subtitle="Base de contacts partagée avec toutes vos apps HT Maintenance"
+              icon={FileText}
+              right={
+                <button onClick={ouvrirNouveauContact} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                  <Plus size={15} /> Nouveau client
+                </button>
+              }
+            >
+              <div className="flex items-end gap-3 flex-wrap mb-2">
+                <div style={{ flex: 1, minWidth: 220 }}>
+                  <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Sélectionner un client existant</label>
+                  <Select
+                    value={selectedContactId}
+                    onChange={choisirContactPourAffaire}
+                    options={[{ value: "", label: "— Choisir —" }, ...contacts.map((c) => ({ value: c.id, label: c.societe || c.contact || "(sans nom)" }))]}
+                  />
+                </div>
+                {selectedContactId && (
+                  <>
+                    <button onClick={() => ouvrirEditionContact(selectedContactId)} className="px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: INK_2 }}>
+                      Modifier
+                    </button>
+                    <button onClick={() => supprimerContact(selectedContactId)} className="px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: "#B0473E" }}>
+                      Supprimer
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {editingContact && (
+                <div style={{ border: `1px solid ${LINE}`, borderRadius: 8 }} className="p-4 mt-3">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
+                    <div>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Société</label>
+                      <TextField value={editingContact.societe} onChange={(v) => setEditingContact((c) => ({ ...c, societe: v }))} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Contact</label>
+                      <TextField value={editingContact.contact} onChange={(v) => setEditingContact((c) => ({ ...c, contact: v }))} placeholder="Nom de l'interlocuteur" />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Email</label>
+                      <TextField value={editingContact.email} onChange={(v) => setEditingContact((c) => ({ ...c, email: v }))} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                    <div style={{ gridColumn: "span 2" }}>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Adresse</label>
+                      <TextField value={editingContact.adresse} onChange={(v) => setEditingContact((c) => ({ ...c, adresse: v }))} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Code postal</label>
+                      <TextField value={editingContact.cp} onChange={(v) => setEditingContact((c) => ({ ...c, cp: v }))} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Ville</label>
+                      <TextField value={editingContact.ville} onChange={(v) => setEditingContact((c) => ({ ...c, ville: v }))} />
+                    </div>
+                  </div>
+                  <div className="mb-4" style={{ maxWidth: 260 }}>
+                    <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Pays (vide = France)</label>
+                    <TextField value={editingContact.pays} onChange={(v) => setEditingContact((c) => ({ ...c, pays: v }))} />
+                  </div>
+
+                  <div className="flex items-center justify-between mb-2">
+                    <label style={{ fontSize: 11, color: MUTED }}>Téléphones</label>
+                    <button onClick={ajouterTelephoneDraft} className="flex items-center gap-1 text-xs font-medium" style={{ color: INK_2 }}>
+                      <Plus size={13} /> Ajouter un numéro
+                    </button>
+                  </div>
+                  <div className="flex flex-col gap-2 mb-4">
+                    {(editingContact.telephones || []).map((tel, idx) => (
+                      <div key={idx} className="grid grid-cols-4 gap-2 items-center">
+                        <Select value={tel.type} onChange={(v) => updateTelephoneDraft(idx, { type: v })} options={[{ value: "Fixe", label: "Fixe" }, { value: "Mobile", label: "Mobile" }]} />
+                        <div style={{ gridColumn: "span 2" }}>
+                          <TextField value={tel.numero} onChange={(v) => updateTelephoneDraft(idx, { numero: v })} placeholder="Numéro" />
+                        </div>
+                        <button onClick={() => supprimerTelephoneDraft(idx)} style={{ color: "#B0473E" }} className="flex justify-end">
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                    {(editingContact.telephones || []).length === 0 && <div style={{ fontSize: 12.5, color: MUTED }}>Aucun numéro renseigné.</div>}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button onClick={enregistrerContact} className="px-3 py-1.5 rounded-md text-sm font-medium" style={{ background: AMBER, color: INK }}>
+                      Enregistrer le contact
+                    </button>
+                    <button onClick={annulerEditionContact} className="px-3 py-1.5 rounded-md text-sm font-medium" style={{ border: `1px solid ${LINE}`, color: INK_2 }}>
+                      Annuler
+                    </button>
+                  </div>
+                </div>
+              )}
             </SectionCard>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-start">
