@@ -2639,6 +2639,18 @@ function PrintableDoc({ type, doc, client, chantier, site, settings, cgv, gammeM
   const partyEmail = client?.email || "";
   const docKind = isDevis ? "devis" : isCommande ? "commande" : "facture";
 
+  // Le navigateur propose le titre de la page comme nom de fichier lors de
+  // l'enregistrement en PDF : on y met le type, le numéro et le client (ou
+  // le fournisseur) pendant l'aperçu, puis on rétablit le titre d'origine.
+  useEffect(() => {
+    const previousTitle = document.title;
+    const partyName = isCommande ? client?.raisonSociale : client?.societe;
+    const kind = isDevis ? "Devis" : isCommande ? "Commande" : "Facture";
+    const raw = [`${kind} ${doc.numero || ""}`.trim(), partyName].filter(Boolean).join(" - ");
+    document.title = raw.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+    return () => { document.title = previousTitle; };
+  }, [doc.numero, client?.societe, client?.raisonSociale, isDevis, isCommande]);
+
   return (
     <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-start justify-center overflow-y-auto py-2 sm:py-8 px-0 sm:px-4 no-print-parent">
       <style>{`
@@ -3742,10 +3754,21 @@ function FactureForm({ initial, clients, catalog, facturesList, settings, onSave
 /* Devis tab                                                              */
 /* ---------------------------------------------------------------------- */
 
-function DevisTab({ devisList, saveDevisList, clients, saveClients, catalog, settings, facturesList, saveFacturesList, openPreview }) {
+function DevisTab({ devisList, saveDevisList, clients, saveClients, catalog, settings, facturesList, saveFacturesList, openPreview, pendingAction, clearPendingAction }) {
   const [editing, setEditing] = useState(null); // null | 'new' | devis object
   const [query, setQuery] = useState("");
   const [converting, setConverting] = useState(null); // devis being converted
+
+  // Action demandée depuis le tableau de bord (modifier / facturer un devis)
+  useEffect(() => {
+    if (!pendingAction || pendingAction.tab !== "devis") return;
+    const d = devisList.find((x) => x.id === pendingAction.id);
+    if (d) {
+      if (pendingAction.action === "convert") setConverting(d);
+      else setEditing(d);
+    }
+    clearPendingAction();
+  }, [pendingAction]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const clientName = (id) => clients.find((c) => c.id === id)?.societe || "—";
 
@@ -3932,9 +3955,17 @@ function ConvertModal({ devis, onCancel, onConfirm }) {
 /* Facture tab                                                            */
 /* ---------------------------------------------------------------------- */
 
-function FacturesTab({ facturesList, saveFacturesList, clients, saveClients, catalog, settings, openPreview }) {
+function FacturesTab({ facturesList, saveFacturesList, clients, saveClients, catalog, settings, openPreview, pendingAction, clearPendingAction }) {
   const [editing, setEditing] = useState(null);
   const [query, setQuery] = useState("");
+
+  // Action demandée depuis le tableau de bord (modifier une facture)
+  useEffect(() => {
+    if (!pendingAction || pendingAction.tab !== "factures") return;
+    const f = facturesList.find((x) => x.id === pendingAction.id);
+    if (f) setEditing(f);
+    clearPendingAction();
+  }, [pendingAction]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const clientName = (id) => clients.find((c) => c.id === id)?.societe || "—";
 
@@ -4203,9 +4234,17 @@ function CommandeForm({ initial, fournisseurs, clients, commandesList, settings,
   );
 }
 
-function CommandesTab({ commandesList, saveCommandesList, fournisseurs, saveFournisseurs, clients, settings, openPreview }) {
+function CommandesTab({ commandesList, saveCommandesList, fournisseurs, saveFournisseurs, clients, settings, openPreview, pendingAction, clearPendingAction }) {
   const [editing, setEditing] = useState(null);
   const [query, setQuery] = useState("");
+
+  // Action demandée depuis le tableau de bord (modifier une commande)
+  useEffect(() => {
+    if (!pendingAction || pendingAction.tab !== "achats") return;
+    const d = commandesList.find((x) => x.id === pendingAction.id);
+    if (d) setEditing(d);
+    clearPendingAction();
+  }, [pendingAction]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fournisseurName = (id) => fournisseurs.find((f) => f.id === id)?.raisonSociale || "—";
   const chantierLabel = (d) => {
@@ -5677,7 +5716,17 @@ function KpiCard({ icon, label, value, sub, accent = "text-slate-800" }) {
   );
 }
 
-function DashboardTab({ devisList, facturesList, commandesList, clients, fournisseurs, settings, setTab, openPreview }) {
+function DashboardTab({ devisList, facturesList, saveFacturesList, commandesList, clients, fournisseurs, settings, setTab, openPreview, goToAction }) {
+  // Boutons d'action d'une ligne (mêmes actions que dans les listes détaillées)
+  const IconBtn = ({ title, onClick, disabled, hover = "hover:text-amber-600", children }) => (
+    <button type="button" title={title} onClick={onClick} disabled={disabled} className={`p-1.5 text-slate-400 ${hover} disabled:opacity-30 disabled:cursor-not-allowed`}>
+      {children}
+    </button>
+  );
+  const mailTo = (doc, party, kind) => { window.location.href = buildMailtoLink(doc, party, settings, kind); };
+  const markPaid = (f) =>
+    saveFacturesList(facturesList.map((x) => (x.id === f.id ? { ...x, statut: "Payée", datePaiement: x.datePaiement || today() } : x)));
+
   const clientName = (id) => clients.find((c) => c.id === id)?.societe || "—";
   const fournisseurName = (id) => fournisseurs.find((f) => f.id === id)?.raisonSociale || "—";
 
@@ -5759,9 +5808,17 @@ function DashboardTab({ devisList, facturesList, commandesList, clients, fournis
                     <div className="font-medium text-slate-800">{d.numero}</div>
                     <div className="text-xs text-slate-400">{clientName(d.clientId)}</div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <StatusBadge statut={d.statut} />
-                    <button onClick={() => openPreview("devis", d)} className="text-slate-400 hover:text-amber-600"><Printer size={14} /></button>
+                  <div className="flex items-center gap-0.5 flex-wrap justify-end">
+                    <span className="mr-1.5"><StatusBadge statut={d.statut} /></span>
+                    <IconBtn title="Convertir en facture" hover="hover:text-emerald-600" onClick={() => goToAction("devis", d.id, "convert")}><ArrowRightLeft size={15} /></IconBtn>
+                    <IconBtn
+                      title={clients.find((c) => c.id === d.clientId)?.email ? "Envoyer ce devis par e-mail" : "Aucun e-mail enregistré pour ce client"}
+                      hover="hover:text-sky-600"
+                      disabled={!clients.find((c) => c.id === d.clientId)?.email}
+                      onClick={() => mailTo(d, clients.find((c) => c.id === d.clientId), "devis")}
+                    ><Mail size={15} /></IconBtn>
+                    <IconBtn title="Aperçu / Imprimer" onClick={() => openPreview("devis", d)}><Printer size={15} /></IconBtn>
+                    <IconBtn title="Modifier" hover="hover:text-slate-700" onClick={() => goToAction("devis", d.id, "edit")}><Pencil size={15} /></IconBtn>
                   </div>
                 </li>
               ))}
@@ -5786,9 +5843,19 @@ function DashboardTab({ devisList, facturesList, commandesList, clients, fournis
                       <div className="font-medium text-slate-800">{f.numero}</div>
                       <div className="text-xs text-slate-400">{clientName(f.clientId)}</div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <StatusBadge statut={st} />
-                      <button onClick={() => openPreview("facture", f)} className="text-slate-400 hover:text-amber-600"><Printer size={14} /></button>
+                    <div className="flex items-center gap-0.5 flex-wrap justify-end">
+                      <span className="mr-1.5"><StatusBadge statut={st} /></span>
+                      {f.statut !== "Payée" && (
+                        <IconBtn title="Marquer comme payée" hover="hover:text-emerald-600" onClick={() => markPaid(f)}><CircleDollarSign size={15} /></IconBtn>
+                      )}
+                      <IconBtn
+                        title={clients.find((c) => c.id === f.clientId)?.email ? "Envoyer cette facture par e-mail" : "Aucun e-mail enregistré pour ce client"}
+                        hover="hover:text-sky-600"
+                        disabled={!clients.find((c) => c.id === f.clientId)?.email}
+                        onClick={() => mailTo(f, clients.find((c) => c.id === f.clientId), "facture")}
+                      ><Mail size={15} /></IconBtn>
+                      <IconBtn title="Aperçu / Imprimer" onClick={() => openPreview("facture", f)}><Printer size={15} /></IconBtn>
+                      <IconBtn title="Modifier" hover="hover:text-slate-700" onClick={() => goToAction("factures", f.id, "edit")}><Pencil size={15} /></IconBtn>
                     </div>
                   </li>
                 );
@@ -5812,9 +5879,16 @@ function DashboardTab({ devisList, facturesList, commandesList, clients, fournis
                     <div className="font-medium text-slate-800">{c.numero}</div>
                     <div className="text-xs text-slate-400">{fournisseurName(c.fournisseurId)}</div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <StatusBadge statut={c.statut} />
-                    <button onClick={() => openPreview("commande", c)} className="text-slate-400 hover:text-amber-600"><Printer size={14} /></button>
+                  <div className="flex items-center gap-0.5 flex-wrap justify-end">
+                    <span className="mr-1.5"><StatusBadge statut={c.statut} /></span>
+                    <IconBtn
+                      title={fournisseurs.find((f) => f.id === c.fournisseurId)?.email ? "Envoyer cette commande par e-mail" : "Aucun e-mail enregistré pour ce fournisseur"}
+                      hover="hover:text-sky-600"
+                      disabled={!fournisseurs.find((f) => f.id === c.fournisseurId)?.email}
+                      onClick={() => mailTo(c, fournisseurs.find((f) => f.id === c.fournisseurId), "commande")}
+                    ><Mail size={15} /></IconBtn>
+                    <IconBtn title="Aperçu / Imprimer" onClick={() => openPreview("commande", c)}><Printer size={15} /></IconBtn>
+                    <IconBtn title="Modifier" hover="hover:text-slate-700" onClick={() => goToAction("achats", c.id, "edit")}><Pencil size={15} /></IconBtn>
                   </div>
                 </li>
               ))}
@@ -5977,6 +6051,7 @@ const NAV = [
 export default function App() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("accueil");
+  const [pendingAction, setPendingAction] = useState(null); // { tab, id, action } demandé depuis le tableau de bord
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [clients, setClients] = useState([]);
   const [catalog, setCatalog] = useState(SEED_CATALOG);
@@ -6486,7 +6561,7 @@ export default function App() {
         )}
 
         {tab === "accueil" && (
-          <DashboardTab devisList={devisList} facturesList={facturesList} commandesList={commandesList} clients={clients} fournisseurs={fournisseurs} settings={settings} setTab={setTab} openPreview={openPreview} />
+          <DashboardTab devisList={devisList} facturesList={facturesList} saveFacturesList={saveFacturesList} commandesList={commandesList} clients={clients} fournisseurs={fournisseurs} settings={settings} setTab={setTab} openPreview={openPreview} goToAction={(tabKey, id, action) => { setPendingAction({ tab: tabKey, id, action }); setTab(tabKey); }} />
         )}
         {tab === "devis" && (
           <DevisTab
@@ -6494,6 +6569,7 @@ export default function App() {
             clients={clients} saveClients={saveClients} catalog={catalog} settings={settings}
             facturesList={facturesList} saveFacturesList={saveFacturesList}
             openPreview={openPreview}
+            pendingAction={pendingAction} clearPendingAction={() => setPendingAction(null)}
           />
         )}
         {tab === "factures" && (
@@ -6501,6 +6577,7 @@ export default function App() {
             facturesList={facturesList} saveFacturesList={saveFacturesList}
             clients={clients} saveClients={saveClients} catalog={catalog} settings={settings}
             openPreview={openPreview}
+            pendingAction={pendingAction} clearPendingAction={() => setPendingAction(null)}
           />
         )}
         {tab === "achats" && (
@@ -6508,6 +6585,7 @@ export default function App() {
             commandesList={commandesList} saveCommandesList={saveCommandesList}
             fournisseurs={fournisseurs} saveFournisseurs={saveFournisseurs} clients={clients} settings={settings}
             openPreview={openPreview}
+            pendingAction={pendingAction} clearPendingAction={() => setPendingAction(null)}
           />
         )}
         {tab === "clients" && (
