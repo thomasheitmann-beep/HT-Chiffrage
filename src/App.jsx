@@ -386,6 +386,12 @@ async function syncContactsToShared(newClients, previousClients) {
   }
 }
 
+// Libellé d'une ligne libre : libellé saisi (poste manuel / main d'œuvre) ou nom de la famille.
+function libelleLigneLibre(l) {
+  if (l.famille === "manuel" || l.famille === "maindoeuvre") return l.libelleManuel || LABEL_FAMILLE[l.famille] || "Poste libre";
+  return LABEL_FAMILLE[l.famille] || l.famille;
+}
+
 function nouveauContactVierge() {
   return { id: uid(), societe: "", contact: "", adresse: "", cp: "", ville: "", pays: "", email: "", telephones: [] };
 }
@@ -1369,6 +1375,8 @@ export default function ChiffrageHTMaintenance() {
         libelleManuel: "",
         joursManuel: 1,
         prixJour: tarifs.expert.jour,
+        description: "",
+        devisExterne: "",
       })),
     ]);
   const updateLigneLibre = (id, patch) => setLignesLibres((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
@@ -1560,7 +1568,10 @@ export default function ChiffrageHTMaintenance() {
         ({ ligne: l, montant }) =>
           new TableRow({
             children: [
-              dataCell(l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille], 0),
+              dataCell(
+                [libelleLigneLibre(l), l.description, l.devisExterne ? `Devis externe : ${l.devisExterne}` : ""].filter(Boolean).join(" — "),
+                0
+              ),
               dataCell("—", 1),
               dataCell(LABEL_FAMILLE[l.famille] || l.famille, 2),
               dataCell("—", 3),
@@ -2174,6 +2185,20 @@ export default function ChiffrageHTMaintenance() {
                           </button>
                         </div>
                       </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+                        <div className="md:col-span-2">
+                          <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Description (type de la ligne)</label>
+                          <TextField
+                            value={l.description || ""}
+                            onChange={(v) => updateLigneLibre(l.id, { description: v })}
+                            placeholder="Ex. relais Schneider 24V, peinture local transfo, location nacelle…"
+                          />
+                        </div>
+                        <div>
+                          <label style={{ fontSize: 11, color: MUTED, display: "block", marginBottom: 2 }}>Devis externe (réf. ou lien)</label>
+                          <TextField value={l.devisExterne || ""} onChange={(v) => updateLigneLibre(l.id, { devisExterne: v })} placeholder="N° de devis ou https://…" />
+                        </div>
+                      </div>
                       <div className="flex items-center justify-between mt-3 pt-3" style={{ borderTop: `1px dashed ${LINE}` }}>
                         <span style={{ fontSize: 12, color: MUTED }}>{detail}</span>
                         <span style={{ fontSize: 15, fontWeight: 700, color: INK, fontVariantNumeric: "tabular-nums" }}>{euros(montant)}</span>
@@ -2288,7 +2313,20 @@ export default function ChiffrageHTMaintenance() {
                     {lignesLibresCalc.map(({ ligne: l, montant }) => (
                       <tr key={l.id} style={{ borderTop: `1px solid ${LINE}` }}>
                         <td className="py-1.5" style={{ color: INK }}>
-                          {l.famille === "manuel" ? l.libelleManuel || "Poste libre" : LABEL_FAMILLE[l.famille]}
+                          {libelleLigneLibre(l)}
+                          {l.description && <div style={{ color: MUTED, fontSize: 11.5 }}>{l.description}</div>}
+                          {l.devisExterne && (
+                            <div style={{ color: MUTED, fontSize: 11.5 }}>
+                              Devis externe :{" "}
+                              {/^https?:\/\//i.test(l.devisExterne) ? (
+                                <a href={l.devisExterne} target="_blank" rel="noreferrer" style={{ color: INK_2, textDecoration: "underline" }}>
+                                  {l.devisExterne}
+                                </a>
+                              ) : (
+                                l.devisExterne
+                              )}
+                            </div>
+                          )}
                         </td>
                         <td className="py-1.5 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
                           {l.quantite}
